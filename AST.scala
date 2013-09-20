@@ -1,6 +1,7 @@
 sealed trait Pred {
   def and(that: Pred): Pred = And(this, that)
   def or(that: Pred): Pred = And(this, that)
+  def unary_! = Not(this)
 }
 object True extends Pred {
   override def and(that: Pred) = that
@@ -47,12 +48,20 @@ case class Range(l: Expr, h: Expr) extends Seq
 case class Compr(expr: Expr, v: Var, r: Seq) extends Seq
 case class Join(l: Seq, r: Seq) extends Seq
 
-
-class Context {
-  val values = Map[Var, Map[List[Int], Int]]()
-}
-
 object Python {
+  val prelude = 
+"""
+class memoize(dict):
+  def __init__(self, func):
+    self.func = func
+  def __call__(self, *args):
+    return self[args]
+  def __missing__(self, key):
+    result = self[key] = self.func(*key)
+    return result
+plus = min
+zero = 10000000000000000000000000000
+"""
   // translate into python list/generator
   def print(s: Seq): String = s match {
     case Range(l, h) => "range(" + print(l) + ", " + print(h) + ")"
@@ -83,10 +92,13 @@ object Python {
     case GE(l, r) => "(" + print(l) + " >= " + print(r) + ")"
   }
   def print(alg: Alg): String = alg match {
-    case Alg(v, args, d, cases) => 
+    case Alg(v, dom, cases) => 
       "@memoize def " + print(v) +
-      "(" + args.map(print(_)).mkString(", ") + "):\n" + 
-      "  assert " + print(d) + "\n" +
+      "(" + dom.map(d => print(d.v)).mkString(", ") + "):\n" + 
+      dom.collect { case d if d.pred != True  => 
+        "  assert " + print(d.pred)
+      }.mkString("\n") + 
+      "\n" +
       cases.map { case (pred, expr) =>
         "  if " + print(pred) +
         ":\n    return " + print(expr)
@@ -119,6 +131,7 @@ object SMT {
 }
 
 object Collect {
+  // Does not consider variable multiplicities
   def vars(e: Expr): Set[Var] = e match {
     case b: BinaryExpr => vars(b.l) ++ vars(b.r)
     case v: Var => Set(v)
@@ -138,14 +151,27 @@ object Collect {
     case True | False => Set()
   }
 }
+
 // Recursive algorithm definition
 case class Alg(v: Var, 
-  args: List[Var], 
-  domain: Pred, 
-  cases: List[(Pred, Expr)])
+  domain: List[Domain], 
+  cases: List[(Pred, Expr)]) {
+  override def toString = Python.print(this)
+  def pre = domain.map(_.pred).reduce(_ and _)
+}
 // Input table
 case class Table(v: Var, dim: Int)
 
+sealed trait Domain {
+  def v: Var
+  def pred: Pred
+}
+case class IntDomain(v: Var, r: Range) extends Domain {
+  override def pred = r.l <= v and v < r.h
+}
+case class Any(v: Var) extends Domain {
+  override def pred = True
+}
 
 object Transform { 
   def transform(p: Pred)(implicit f: PartialFunction[Expr, Expr]): Pred = p match {
@@ -183,46 +209,67 @@ object Transform {
 
 
   // These transformation are correct by construction
+  val z3 = new Z3
 
-  def pushVars(vs: Var*)(a: Alg, fresh: Var) = a match {
-    case Alg(name, args, dom, cases) =>
+  def increment(name: String): String = {
+    import java.util.regex._
+    val p = Pattern.compile("\\d+$");
+    val m = p.matcher(name);
+    if (m.find()) {
+      val i = m.group();
+      name.substring(0, name.size - i.size) + (i.toInt + 1)
+    } else
+      name + "0"
+  }
+
+  def increment(v: Var): Var = Var(increment(v.name))
+ 
+  def pushVars(vs: Var*): Alg => Alg = {
+    case Alg(av, dom, cases) =>
+      val fresh = increment(av)
       implicit def t: PartialFunction[Expr, Expr] = {
-        case App(v, args) if v == name => App(fresh, args ::: vs.toList)
+        case App(v, args) if v == av => App(fresh, args ::: vs.toList)
       }
-      Alg(fresh, args ::: vs.toList, dom, cases.map { 
+      Alg(fresh, dom ::: vs.toList.map(Any(_)), cases.map { 
           case (pred, expr) => (transform(pred), transform(expr))
       }) 
   }
+  
+  def split(base: Pred, splits: Map[Var, Expr]): Alg => Alg = {
+    case Alg(av, dom, cases) =>
+      val fresh = increment(av)
 
-  def partition(base: Pred, ps: Pred*)(a: Alg, fresh: Var) = a match {
-    case Alg(name, args, dom, cases) =>
-      val rec = App(name, args);
-      def preds(ps: List[Pred], out: List[Pred] = True :: Nil): List[Pred] = 
-        ps match {
-          case Nil => out
-          case p :: ps => 
-            preds(ps, out.map(_ and p)) :::
-            preds(ps, out.map(_ and Not(p)))
-        }
-      Alg(fresh, args, dom, 
-        (base, rec) :: 
-        preds(ps.toList).map((_, rec)))               
+      // create specialized versions of alg by splitting the domain
+      var parts: List[(Pred, Expr)] = Nil;
+      def rec(vs: List[(Var, Expr)], prefix: Pred = True) {
+        vs match {
+          case Nil => parts = (prefix, App(av, dom.map(_.v))) :: parts
+          case v :: vs => 
+            rec(vs, prefix and v._1 < v._2)
+            rec(vs, prefix and v._1 >= v._2)
+        }        
+      }
+
+      rec(splits.toList)
+      
+      val out = Alg(fresh, dom, 
+        (base, App(av, dom.map(_.v))) :: parts.reverse)
+
+      out
   }
 
-  val z3 = new Z3
+  def eliminate: Alg => Alg = {
+    case a @ Alg(av, dom, cases) =>
+      Alg(increment(av), dom, cases.filter {
+          case (pred, _) => z3.solve(a.pre and pred)
+      })      
+  }
 
-  def elimCases(a: Alg, fresh: Var) =
-    Alg(fresh, a.args, a.domain, 
-      for ((pred, expr) <- a.cases;
-           if z3.solve(pred and a.domain))
-           yield (pred, expr))
+  
 }
 
 object Parenthesis {
-  implicit def string2expr(s: String) = Var(s)
   implicit def int2expr(i: Int) = Const(i)
-
-  val ctx = new Context
 
   val i = Var("i")
   val j = Var("j")
@@ -232,30 +279,34 @@ object Parenthesis {
   val w = Var("w")
   val x = Var("x")
   val n = Var("n")
-  val C = Alg(c, List(i, j), 
-    i < n and j < n and i < j and i >= 0 and j >= 0,
+  val C = Alg(c, 
+    List(
+      IntDomain(i, Range(0, n)), 
+      IntDomain(j, Range(i+1, n))
+    ), 
     List(
       (i === j - 1, x(j)),
       (True, Reduce(Join(
         Compr(c(i, k) + c(k, j), k, Range(i+1, j)),
         Compr(w(i, k, j), k, Range(i+1, j))
-      )))))
+      )))
+    )
+  )
 
 
   def main(args: Array[String]) {
-    Console.out.println(Python.print(C))
+    import Console.println
+    import Transform._
+    println(C)
 
-    val c1 = Var("c1")
-    val C1 = Transform.pushVars(n, w, x)(C, c1)
-    Console.out.println(Python.print(C1))
+    val C0 = pushVars(n, w, x)(C)
+    println(C0)
 
-    val c2 = Var("c2")
-    val C2 = Transform.partition(n < 4, i < n/2, j < n/2)(C1, c2)
-    Console.out.println(Python.print(C2))
+    val C1 = split(n < 4, Map(i -> n/2, j -> n/2))(C0)
+    println(C1)
 
-    val c3 = Var("c3")
-    val C3 = Transform.elimCases(C2, c3)
-    Console.out.println(Python.print(C3))
+    val C2 = eliminate(C1)
+    println(C2)
 
     // now comes the inductive argument:
     // we can substitute c1 by c3 in some cases with appropriate

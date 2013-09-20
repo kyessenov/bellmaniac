@@ -95,12 +95,12 @@ class Z3 extends Solver {
     process.destroy;
   }
 
-  def declareInt(v: Var) = command("(declare-fun " + v.name + " () Int)")
+  def declare(v: Var) = command("(declare-fun " + v.name + " () Int)")
   def solve(p: Pred): Boolean = {
     val vs = Collect.vars(p);
     reset();
     for (v <- vs) 
-      declareInt(v);
+      declare(v);
     assert(SMT.print(p));    
     check();
   }
