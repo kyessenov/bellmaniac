@@ -2,6 +2,7 @@ sealed trait Pred {
   def and(that: Pred): Pred = And(this, that)
   def or(that: Pred): Pred = And(this, that)
   def unary_! = Not(this)
+  override def toString = Python.print(this)
 }
 object True extends Pred {
   override def and(that: Pred) = that
@@ -28,6 +29,7 @@ sealed trait Expr {
   def <=(that: Expr) = LE(this, that)
   def >(that: Expr) = GT(this, that)
   def >=(that: Expr) = GE(this, that)
+  override def toString = Python.print(this)
 }
 case class Var(name: String) extends Expr {
   def apply(exprs: Expr*) = App(this, exprs.toList)
@@ -91,30 +93,45 @@ zero = 10000000000000000000000000000
     case LE(l, r) => "(" + print(l) + " <= " + print(r) + ")"
     case GE(l, r) => "(" + print(l) + " >= " + print(r) + ")"
   }
-  def print(alg: Alg): String = alg match {
-    case Alg(v, dom, cases) => 
-      "@memoize def " + print(v) +
+  def print(alg: Algorithm): String = alg match {
+    case Algorithm(v, dom, cases) => 
+      "@memoize\ndef " + print(v) +
       "(" + dom.map(d => print(d.v)).mkString(", ") + "):\n" + 
       dom.collect { case d if d.pred != True  => 
         "  assert " + print(d.pred)
       }.mkString("\n") + 
-      "\n" +
+      "\n  if " +
       cases.map { case (pred, expr) =>
-        "  if " + print(pred) +
-        ":\n    return " + print(expr)
-      }.mkString("\n")
+        print(pred) + ":\n    return " + print(expr)
+      }.mkString("\n  elif ")
       
   }
 }
 
 object SMT {
-  def print(e: Expr): String = (e: @unchecked) match {
+  val z3 = new Z3
+  import z3._
+  command("(declare-sort Seq 0)")
+  command("(declare-fun zero () Int)")
+  command("(declare-fun reduce (Seq Int) Int)")
+  command("(declare-fun range (Int Int) Seq)")
+  command("(declare-fun join (Seq Seq) Seq)")
+  
+  def print(e: Expr): String = e match {
     case Var(n) => n
     case Const(i) => i.toString
     case Plus(l, r) => "(+ " + print(l) + " " + print(r) + ")"
     case Minus(l, r) => "(- " + print(l) + " " + print(r) + ")"
     case Times(l, r) => "(* " + print(l) + " " + print(r) + ")"
     case Div(l, r) => "(div " + print(l) + " " + print(r) + ")"
+    case Zero => "zero"
+    case Reduce(r, init) => "reduce(" + print(r) + ", " + init + ")"
+    case _: App => ???
+  }
+  def print(s: Seq): String = s match {
+    case Range(l, h) => "range(" + print(l) + ", " + print(h) + ")"
+    case Join(l, r) => "join(" + print(l) + ", " + print(r) + ")"
+    case Compr(e, v, r) => ???
   }
   def print(p: Pred): String = p match {
     case True => "true"
@@ -127,6 +144,22 @@ object SMT {
     case GT(l, r) => "(> " + print(l) + " " + print(r) + ")"
     case LE(l, r) => "(<= " + print(l) + " " + print(r) + ")"
     case GE(l, r) => "(>= " + print(l) + " " + print(r) + ")"
+  }
+  
+  // Check for satisfaction
+  def check(p: Pred) = {
+    val vs = Collect.vars(p)
+    push()
+    for (v <- vs) 
+      command("(declare-fun " + v.name + " () Int)")
+    assert(print(p))
+    val out = z3.check()
+    pop()
+    out
+  }
+
+  def close() {
+    z3.close()
   }
 }
 
@@ -153,10 +186,11 @@ object Collect {
 }
 
 // Recursive algorithm definition
-case class Alg(v: Var, 
+case class Algorithm(v: Var, 
   domain: List[Domain], 
   cases: List[(Pred, Expr)]) {
   override def toString = Python.print(this)
+  def args = domain.map(_.v)
   def pre = domain.map(_.pred).reduce(_ and _)
 }
 // Input table
@@ -207,11 +241,7 @@ object Transform {
       case Join(l, r) => Join(transform(l), transform(r))
     }
 
-
-  // These transformation are correct by construction
-  val z3 = new Z3
-
-  def increment(name: String): String = {
+  private def increment(name: String): String = {
     import java.util.regex._
     val p = Pattern.compile("\\d+$");
     val m = p.matcher(name);
@@ -222,21 +252,32 @@ object Transform {
       name + "0"
   }
 
-  def increment(v: Var): Var = Var(increment(v.name))
+  def substitute(e: Expr, f: Map[Var, Expr]) = 
+    transform(e) {
+      case v: Var if f.contains(v) => f(v)
+    }
+
+  def substitute(p: Pred, f: Map[Var, Expr]) =
+    transform(p) {
+      case v: Var if f.contains(v) => f(v)
+    }
+    
+  private def increment(v: Var): Var = Var(increment(v.name))
  
-  def pushVars(vs: Var*): Alg => Alg = {
-    case Alg(av, dom, cases) =>
+  // These transformation are correct by construction
+  def pushVars(vs: Var*): Algorithm => Algorithm = {
+    case Algorithm(av, dom, cases) =>
       val fresh = increment(av)
       implicit def t: PartialFunction[Expr, Expr] = {
         case App(v, args) if v == av => App(fresh, args ::: vs.toList)
       }
-      Alg(fresh, dom ::: vs.toList.map(Any(_)), cases.map { 
+      Algorithm(fresh, dom ::: vs.toList.map(Any(_)), cases.map { 
           case (pred, expr) => (transform(pred), transform(expr))
       }) 
   }
   
-  def split(base: Pred, splits: Map[Var, Expr]): Alg => Alg = {
-    case Alg(av, dom, cases) =>
+  def split(base: Pred, splits: Map[Var, Expr]): Algorithm => Algorithm = {
+    case Algorithm(av, dom, cases) =>
       val fresh = increment(av)
 
       // create specialized versions of alg by splitting the domain
@@ -252,21 +293,166 @@ object Transform {
 
       rec(splits.toList)
       
-      val out = Alg(fresh, dom, 
+      val out = Algorithm(fresh, dom, 
         (base, App(av, dom.map(_.v))) :: parts.reverse)
 
       out
   }
 
-  def eliminate: Alg => Alg = {
-    case a @ Alg(av, dom, cases) =>
-      Alg(increment(av), dom, cases.filter {
-          case (pred, _) => z3.solve(a.pre and pred)
+  def eliminate: Algorithm => Algorithm = {
+    case a @ Algorithm(av, dom, cases) =>
+      Algorithm(increment(av), dom, cases.filter {
+          case (pred, _) => SMT.check(a.pre and pred)
       })      
   }
 
-  
+  import Console.println
+
+  /*
+  Rewrite operation c(v) = d(w)
+  To make it feasible, we restrict to the following form
+    "p(v) => c(v) = d(f(v))"
+  where f is the translation operator consisting of affine transformations,
+  lift-translate transformations of the argument functions, and combination thereof.
+  p is an arbitrary predicate.
+
+  Given that c and d are defined inductively, we prove this by induction on v.
+  Two main arguments:
+  1) base case
+  2) inductive cases v -> v1,v2,...,vk
+    (some of the vi cases may not satisfy p, in which case nothing is known)
+
+  p and c are given. d is chosen from a small set of functions. We'd like f to be inferred.
+
+  The strategy is to use direct unification of d expression with c.
+  1) Prove d recursive calls satisfy induction.
+  2) Replace d calls with c calls, may need to invert f and/or apply-unapply function transformations.
+  3) Unify! Later on we can use theorem proving to make SMT do the job for us but for now we need to infer f.
+  */
+
+  // d is applied to f(c_args)
+  // f provides map from arguments of d to expressions of c
+  def unify(p: Pred, c: Algorithm, d: Algorithm, subs: (Var, Expr)*) = {
+    try {
+      val f = new Unification(c, d, subs: _*)
+     
+      // recover f, assuming both c and d are well-defined (induction holds)
+      f.unify
+      
+      // check for well-definedness of d
+      val domains = p and c.pre and ! f.unified(d.pre)
+      if (SMT.check(domains)) {
+        println("failed to check domains")
+        None
+      } else {
+      
+        // check for base cases and validity of inductive steps
+     
+        // p and base 
+
+        // p and ! base 
+
+        // TODO: induction proof
+        Some(f)
+      }
+    } catch {
+      case Contradiction => None
+    }
+  }
 }
+
+object Contradiction extends RuntimeException
+class Unification(val C: Algorithm, val D: Algorithm) {
+  var subs: Map[Var, Expr] = Map()
+  import Transform.substitute
+
+  def this(C: Algorithm, D: Algorithm, subs: (Var, Expr)*) {
+    this(C, D)
+    this.subs = subs.toMap  
+  }
+
+  def mask = {
+    var out = subs
+    for (v <- D.args if ! out.contains(v))
+      out = out + (v -> Var("x??"))
+    out
+  }
+
+  def unified(de: Expr) = substitute(de, mask)
+  def unified(dp: Pred) = substitute(dp, mask)
+
+  def unify() {
+    if (C.cases.size != D.cases.size)
+      throw Contradiction
+    else
+      for (((cp, ce), (dp, de)) <- C.cases zip D.cases) {
+        unify(cp, dp)
+        unify(ce, de)
+      }
+  }
+
+  def unify(c: Expr, d: Expr) {
+    println(c + " -> " + d)
+    (c, d) match {
+      // inductive recursive call
+      case (App(cv, cargs), App(dv, dargs)) if cv == C.v && dv == D.v => 
+        // avoid inversing f, commuting diagram  
+        for ((formal, actual) <- D.args zip dargs)
+          if (unified(actual) != substitute(mask(formal), (C.args zip cargs).toMap)) {
+            throw Contradiction
+          }
+      case (App(cv, cargs), App(dv, dargs)) =>
+        unify(cv, dv)
+        for ((ca, da) <- cargs zip dargs)
+          unify(ca, da)      
+      case (c: BinaryExpr, d: BinaryExpr) if c.getClass == d.getClass =>
+        unify(c.l, d.l)
+        unify(c.r, d.r)
+      case (Zero, Zero) => 
+      case (Reduce(cr, ci), Reduce(dr, di)) if ci == unified(di) =>
+        unify(cr, dr) 
+      case (c, d) if c == unified(d) =>
+      case (c, d: Var) if D.args.contains(d) && ! subs.contains(d) =>       
+        subs = subs + (d -> c)
+      case _ =>
+        throw Contradiction
+    }
+  }
+
+  def unify(c: Seq, d: Seq) {
+    (c, d) match {
+      case (Join(c0, c1), Join(d0, d1)) =>
+        unify(c0, d0)
+        unify(c1, d1)
+      case (Range(cl, ch), Range(dl, dh)) =>
+        unify(cl, dl)
+        unify(ch, dh)
+      case (Compr(cexpr, cv, cr), Compr(dexpr, dv, dr)) if cv == unified(dv) =>
+        unify(cr, dr)
+        unify(cexpr, dexpr)
+    }
+  }
+
+  def unify(c: Pred, d: Pred) {
+    (c, d) match {
+      case (False, False) =>
+      case (True, True) =>
+      case (c: Comparison, d: Comparison) if c.getClass == d.getClass =>
+        unify(c.l, d.l)
+        unify(c.r, d.r)
+      case (c: BinaryPred, d: BinaryPred) if c.getClass == d.getClass =>
+        unify(c.l, d.l)
+        unify(c.r, d.r)
+      case (Not(c), Not(d)) => 
+        unify(c, d)
+      case _ =>
+        throw Contradiction
+    }
+  }
+
+  override def toString = mask.toString
+}
+
 
 object Parenthesis {
   implicit def int2expr(i: Int) = Const(i)
@@ -279,7 +465,7 @@ object Parenthesis {
   val w = Var("w")
   val x = Var("x")
   val n = Var("n")
-  val C = Alg(c, 
+  val C = Algorithm(c, 
     List(
       IntDomain(i, Range(0, n)), 
       IntDomain(j, Range(i+1, n))
@@ -308,23 +494,8 @@ object Parenthesis {
     val C2 = eliminate(C1)
     println(C2)
 
-    // now comes the inductive argument:
-    // we can substitute c1 by c3 in some cases with appropriate
-    // input domain shift
+    println(unify(i >= n/2 and j >= n/2, C0, C0, i -> (i-n/2), j -> (j-n/2), n -> n/2))
 
-    // need to know: 
-    //  order (which is same as dependency graph of the original algorithm)
-    //  how to unroll and unify defs
-    //  there is a change in induction (induct on n now)
-    // prove by (n, i + j)
-   
-    // claim1: c1(i,j,n) = c1(i,j,n/2) whenever domains overlap
-    // proof: induct on i,j; base cases don't have n; n was pushed 
-
-
-    // claim2: c1(i,j,n/2) = c3(i,j,n/2)
-    // proof: induct on n
-
-    Transform.z3.close
+    SMT.close()
   }
 }
