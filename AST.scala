@@ -1,25 +1,50 @@
-sealed trait Pred {
-  def and(that: Pred): Pred = And(this, that)
-  def or(that: Pred): Pred = And(this, that)
-  def unary_! = Not(this)
+sealed trait Term {
+  def vars: Set[Var]
+}
+// Boolean predicate
+sealed trait Pred extends Term {
+  def and(that: Pred): Pred = that match {
+    case True => this
+    case _ => And(this, that)
+  }
+  def or(that: Pred): Pred = that match {
+    case False => this
+    case _ => Or(this, that)
+  }
+  def unary_! = Not(this)  
   override def toString = Python.print(this)
 }
 object True extends Pred {
   override def and(that: Pred) = that
+  def vars = Set()
 }
-object False extends Pred
-sealed trait Comparison extends Pred { def l: Expr; def r: Expr }
+object False extends Pred {
+  override def or(that: Pred) = that
+  def vars = Set()
+}
+sealed trait Comparison extends Pred { 
+  def l: Expr
+  def r: Expr 
+  def vars = l.vars ++ r.vars
+}
 case class Eq(l: Expr, r: Expr) extends Comparison
 case class GT(l: Expr, r: Expr) extends Comparison
 case class LT(l: Expr, r: Expr) extends Comparison
 case class GE(l: Expr, r: Expr) extends Comparison
 case class LE(l: Expr, r: Expr) extends Comparison
-sealed trait BinaryPred extends Pred { def l: Pred; def r: Pred }
+sealed trait BinaryPred extends Pred { 
+  def l: Pred
+  def r: Pred 
+  def vars = l.vars ++ r.vars
+}
 case class And(l: Pred, r: Pred) extends BinaryPred
 case class Or(l: Pred, r: Pred) extends BinaryPred
-case class Not(p: Pred) extends Pred
+case class Not(p: Pred) extends Pred {
+  def vars = p.vars
+}
 
-sealed trait Expr {
+// Expression (integer)
+sealed trait Expr extends Term {
   def +(that: Expr) = Plus(this, that)
   def -(that: Expr) = Minus(this, that)
   def *(that: Expr) = Times(this, that)
@@ -31,24 +56,50 @@ sealed trait Expr {
   def >=(that: Expr) = GE(this, that)
   override def toString = Python.print(this)
 }
-case class Var(name: String) extends Expr {
+sealed trait Funct extends Expr {
   def apply(exprs: Expr*) = App(this, exprs.toList)
 }
-case class Const(i: Int) extends Expr
-sealed trait BinaryExpr extends Expr { def l: Expr; def r: Expr }
+case class Var(name: String) extends Funct {
+  def vars = Set(this)
+}
+case class OpVar(v: Var, args: List[Var], exprs: List[Expr]) extends Funct {
+  assert(exprs.size == args.size)
+  def vars = exprs.flatMap(_.vars).toSet -- args.toSet
+}
+case class Const(i: Int) extends Expr {
+  def vars = Set()
+}
+sealed trait BinaryExpr extends Expr { 
+  def l: Expr
+  def r: Expr 
+  def vars = l.vars ++ r.vars
+}
 case class Plus(l: Expr, r: Expr) extends BinaryExpr
 case class Minus(l: Expr, r: Expr) extends BinaryExpr
 case class Times(l: Expr, r: Expr) extends BinaryExpr
 case class Div(l: Expr, r: Expr) extends BinaryExpr
-case class App(v: Var, args: List[Expr]) extends Expr
-object Zero extends Expr
-case class Reduce(range: Seq, init: Expr = Zero) extends Expr
+case class App(v: Funct, args: List[Expr]) extends Expr {
+  // TODO: arity checks (useful but not necessary)
+  def vars = args.flatMap(_.vars).toSet ++ v.vars
+}
+object Zero extends Expr {
+  def vars = Set()
+}
+case class Reduce(range: Seq, init: Expr = Zero) extends Expr {
+  def vars = range.vars ++ init.vars
+}
 
 // Sequence of values to be reduced
-sealed trait Seq
-case class Range(l: Expr, h: Expr) extends Seq
-case class Compr(expr: Expr, v: Var, r: Seq) extends Seq
-case class Join(l: Seq, r: Seq) extends Seq
+sealed trait Seq extends Term 
+case class Range(l: Expr, h: Expr) extends Seq {
+  def vars = l.vars ++ h.vars
+}
+case class Compr(expr: Expr, v: Var, r: Seq) extends Seq {
+  def vars = r.vars ++ expr.vars + v
+}
+case class Join(l: Seq, r: Seq) extends Seq {
+  def vars = l.vars ++ r.vars
+}
 
 object Python {
   val prelude = 
@@ -80,6 +131,8 @@ zero = 10000000000000000000000000000
     case App(v, args) => print(v) + "(" + args.map(print(_)).mkString(", ") + ")"
     case Reduce(r, init) => "reduce(plus, " + print(r) + ", " + print(init) + ")"
     case Zero => "zero"
+    case OpVar(v, args, exprs) => "(lambda " + args.map(print(_)).mkString(", ") + 
+      ": " + print(v) + "(" + exprs.map(print(_)).mkString(", ") + ")"
   }
   def print(p: Pred): String = p match {
     case True => "True"
@@ -127,6 +180,7 @@ object SMT {
     case Zero => "zero"
     case Reduce(r, init) => "reduce(" + print(r) + ", " + init + ")"
     case _: App => ???
+    case _: OpVar => ???
   }
   def print(s: Seq): String = s match {
     case Range(l, h) => "range(" + print(l) + ", " + print(h) + ")"
@@ -148,10 +202,10 @@ object SMT {
   
   // Check for satisfaction
   def check(p: Pred) = {
-    val vs = Collect.vars(p)
     push()
-    for (v <- vs) 
+    for (v <- p.vars) 
       command("(declare-fun " + v.name + " () Int)")
+    println("solving " + p)
     assert(print(p))
     val out = z3.check()
     pop()
@@ -163,28 +217,6 @@ object SMT {
   }
 }
 
-object Collect {
-  // Does not consider variable multiplicities
-  def vars(e: Expr): Set[Var] = e match {
-    case b: BinaryExpr => vars(b.l) ++ vars(b.r)
-    case v: Var => Set(v)
-    case Const(_) | Zero => Set()
-    case App(v, args) => args.map(vars(_)).reduce(_ ++ _) + v
-    case Reduce(range, init) => vars(range) ++ vars(init)
-  }
-  def vars(s: Seq): Set[Var] = s match {
-    case _: Range => Set()
-    case Join(l, r) => vars(l) ++ vars(r)
-    case Compr(expr, v, r) => vars(r) ++ (vars(expr) - v)
-  }
-  def vars(p: Pred): Set[Var] = p match {
-    case b: Comparison => vars(b.l) ++ vars(b.r)
-    case b: BinaryPred => vars(b.l) ++ vars(b.r)
-    case Not(p) => vars(p)
-    case True | False => Set()
-  }
-}
-
 // Recursive algorithm definition
 case class Algorithm(v: Var, 
   domain: List[Domain], 
@@ -192,10 +224,11 @@ case class Algorithm(v: Var,
   override def toString = Python.print(this)
   def args = domain.map(_.v)
   def pre = domain.map(_.pred).reduce(_ and _)
+  def vars = 
+    args.toSet ++ 
+    domain.flatMap(_.pred.vars) ++ 
+    cases.flatMap { case (p, e) => p.vars ++ e.vars } 
 }
-// Input table
-case class Table(v: Var, dim: Int)
-
 sealed trait Domain {
   def v: Var
   def pred: Pred
@@ -230,14 +263,17 @@ object Transform {
       case Minus(l, r) => Minus(transform(l), transform(r))
       case Times(l, r) => Times(transform(l), transform(r))
       case Div(l, r) => Div(transform(l), transform(r))
-      case App(v: Var, args: List[Expr]) => App(transform(v).asInstanceOf[Var], args.map(transform(_)))
+      case App(v, args) => 
+        App(transform(v).asInstanceOf[Funct], args.map(transform(_)))
       case Zero => Zero
       case Reduce(range, init) => Reduce(transform(range), transform(init))
+      case OpVar(v, args, exprs) => 
+        OpVar(transform(v).asInstanceOf[Var], args, exprs.map(transform(_)))
     }
   def transform(s: Seq)(implicit f: PartialFunction[Expr, Expr]): Seq = 
     s match {
       case Range(l, h) => Range(transform(l), transform(h))
-      case Compr(expr, v, r) => Compr(transform(expr), transform(v).asInstanceOf[Var], transform(r))
+      case Compr(expr, v, r) => Compr(transform(expr), v, transform(r))
       case Join(l, r) => Join(transform(l), transform(r))
     }
 
@@ -308,7 +344,7 @@ object Transform {
 
   import Console.println
 
-  /*
+/*
   Rewrite operation c(v) = d(w)
   To make it feasible, we restrict to the following form
     "p(v) => c(v) = d(f(v))"
@@ -328,14 +364,14 @@ object Transform {
   1) Prove d recursive calls satisfy induction.
   2) Replace d calls with c calls, may need to invert f and/or apply-unapply function transformations.
   3) Unify! Later on we can use theorem proving to make SMT do the job for us but for now we need to infer f.
-  */
+*/
 
   // d is applied to f(c_args)
   // f provides map from arguments of d to expressions of c
   def unify(p: Pred, c: Algorithm, d: Algorithm, subs: (Var, Expr)*) = {
+    val f = new Unification(c, d, subs: _*)
+    
     try {
-      val f = new Unification(c, d, subs: _*)
-     
       // recover f, assuming both c and d are well-defined (induction holds)
       f.unify
       
@@ -356,28 +392,35 @@ object Transform {
         Some(f)
       }
     } catch {
-      case Contradiction => None
+      case Contradiction => 
+        println(f)
+        None
+      case _: NotImplementedError => 
+        println(f)
+        None
     }
   }
 }
 
 object Contradiction extends RuntimeException
-class Unification(val C: Algorithm, val D: Algorithm) {
-  var subs: Map[Var, Expr] = Map()
+class Unification(val C: Algorithm, val D: Algorithm, var subs: Map[Var, Expr]) {
+  var vars = D.vars
   import Transform.substitute
 
-  def this(C: Algorithm, D: Algorithm, subs: (Var, Expr)*) {
-    this(C, D)
-    this.subs = subs.toMap  
-  }
+  val hole = Var("??")
+
+  def this(C: Algorithm, D: Algorithm, subs: (Var, Expr)*) =
+    this(C, D, subs.toMap) 
 
   def mask = {
     var out = subs
-    for (v <- D.args if ! out.contains(v))
-      out = out + (v -> Var("x??"))
+    for (v <- vars if ! out.contains(v))
+      out = out + (v -> hole)
     out
   }
 
+  def resolved(de: Expr) = ! unified(de).vars.contains(hole)
+  def resolved(dp: Pred) = ! unified(dp).vars.contains(hole)
   def unified(de: Expr) = substitute(de, mask)
   def unified(dp: Pred) = substitute(dp, mask)
 
@@ -392,34 +435,46 @@ class Unification(val C: Algorithm, val D: Algorithm) {
   }
 
   def unify(c: Expr, d: Expr) {
-    println(c + " -> " + d)
+    println(c + " :: " + d)
     (c, d) match {
       // inductive recursive call
-      case (App(cv, cargs), App(dv, dargs)) if cv == C.v && dv == D.v => 
+      case (App(cv, cargs), App(dv, dargs)) if cv == C.v && dv == D.v =>  
         // avoid inversing f, commuting diagram  
-        for ((formal, actual) <- D.args zip dargs)
-          if (unified(actual) != substitute(mask(formal), (C.args zip cargs).toMap)) {
-            throw Contradiction
-          }
+        for ((formal, actual) <- D.args zip dargs) {
+          val da = unified(actual)
+          val dc = substitute(mask(formal), (C.args zip cargs).toMap)
+          if (da != dc && SMT.check(! (da === dc)))
+            throw Contradiction          
+        }
       case (App(cv, cargs), App(dv, dargs)) =>
-        unify(cv, dv)
-        for ((ca, da) <- cargs zip dargs)
-          unify(ca, da)      
+        unified(dv) match {
+          // unfold lambdas in app (note lambda operator is unified as well)
+          case OpVar(v, args, exprs) if resolved(dv) && v == cv =>
+            for ((ca, da) <- cargs zip exprs)
+              unify(ca, substitute(da, (args zip dargs).toMap))            
+          case _ =>          
+            unify(cv, dv)
+            for ((ca, da) <- cargs zip dargs)
+              unify(ca, da)      
+        }
+      case (Reduce(cr, ci), Reduce(dr, di)) if ci == unified(di) =>
+        unify(cr, dr) 
+      case (c, d: Var) if vars.contains(d) && ! subs.contains(d) =>       
+        subs = subs + (d -> c)
+      case (_, d) if resolved(d) =>
+        // prove expression equivalence
+        if (c != unified(d) && SMT.check(! (c === unified(d))))
+          throw Contradiction
       case (c: BinaryExpr, d: BinaryExpr) if c.getClass == d.getClass =>
         unify(c.l, d.l)
         unify(c.r, d.r)
-      case (Zero, Zero) => 
-      case (Reduce(cr, ci), Reduce(dr, di)) if ci == unified(di) =>
-        unify(cr, dr) 
-      case (c, d) if c == unified(d) =>
-      case (c, d: Var) if D.args.contains(d) && ! subs.contains(d) =>       
-        subs = subs + (d -> c)
       case _ =>
         throw Contradiction
     }
   }
 
   def unify(c: Seq, d: Seq) {
+    println(c + " :: " + d)
     (c, d) match {
       case (Join(c0, c1), Join(d0, d1)) =>
         unify(c0, d0)
@@ -427,24 +482,33 @@ class Unification(val C: Algorithm, val D: Algorithm) {
       case (Range(cl, ch), Range(dl, dh)) =>
         unify(cl, dl)
         unify(ch, dh)
-      case (Compr(cexpr, cv, cr), Compr(dexpr, dv, dr)) if cv == unified(dv) =>
-        unify(cr, dr)
+      case (Compr(cexpr, cv, Range(cl, ch)), Compr(dexpr, dv, Range(dl, dh))) =>
+        unify(ch - cl, dh - dl)
+        unify(cv - cl + unified(dl), dv)
         unify(cexpr, dexpr)
+      case (Compr(cexpr, cv, cr), Compr(dexpr, dv, dr)) =>
+        unify(cr, dr)
+        unify(cv, dv)
+        unify(cexpr, dexpr)
+      case _ =>
+        throw Contradiction
     }
   }
 
   def unify(c: Pred, d: Pred) {
     (c, d) match {
-      case (False, False) =>
-      case (True, True) =>
-      case (c: Comparison, d: Comparison) if c.getClass == d.getClass =>
-        unify(c.l, d.l)
-        unify(c.r, d.r)
+      case (_, d) if resolved(d) =>
+        // prove predicate equivalence
+        if (SMT.check(c and ! unified(d)))
+          throw Contradiction        
       case (c: BinaryPred, d: BinaryPred) if c.getClass == d.getClass =>
         unify(c.l, d.l)
         unify(c.r, d.r)
       case (Not(c), Not(d)) => 
         unify(c, d)
+      case (c: Comparison, d: Comparison) if c.getClass == d.getClass =>
+        unify(c.l, d.l)
+        unify(c.r, d.r)
       case _ =>
         throw Contradiction
     }
@@ -458,10 +522,11 @@ object Parenthesis {
   implicit def int2expr(i: Int) = Const(i)
 
   val i = Var("i")
-  val j = Var("j")
+  val j = Var("j")  
   val c = Var("c")
-  val k = Var("k")
-  
+  val k1 = Var("k1")
+  val k2 = Var("k2")
+
   val w = Var("w")
   val x = Var("x")
   val n = Var("n")
@@ -473,8 +538,8 @@ object Parenthesis {
     List(
       (i === j - 1, x(j)),
       (True, Reduce(Join(
-        Compr(c(i, k) + c(k, j), k, Range(i+1, j)),
-        Compr(w(i, k, j), k, Range(i+1, j))
+        Compr(c(i, k1) + c(k1, j), k1, Range(i+1, j)),
+        Compr(w(i, k2, j), k2, Range(i+1, j))
       )))
     )
   )
@@ -494,7 +559,13 @@ object Parenthesis {
     val C2 = eliminate(C1)
     println(C2)
 
-    println(unify(i >= n/2 and j >= n/2, C0, C0, i -> (i-n/2), j -> (j-n/2), n -> n/2))
+    println(unify(i < n/2 and j < n/2, C0, C0,
+      n -> n/2))
+
+    println(unify(i >= n/2 and j >= n/2, C0, C0, 
+      i -> (i-n/2), j -> (j-n/2), n -> n/2,
+      x -> OpVar(x, List(j), List(j+n)),
+      w -> OpVar(w, List(i, k1, j), List(i+n, k1+n, j+n))))
 
     SMT.close()
   }
