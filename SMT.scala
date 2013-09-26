@@ -6,6 +6,7 @@ case class SolverException(msg: String) extends RuntimeException(msg)
 trait Solver {
   /** Issue a command and expect success. */
   def command(s: String) {
+    //println(s)
     >(s);
     val reply = <();
     if (reply != "success") 

@@ -55,21 +55,15 @@ sealed trait Expr extends Term {
   def >(that: Expr) = GT(this, that)
   def >=(that: Expr) = GE(this, that)
   override def toString = Python.print(this)
+  def arity = 0
 }
-sealed trait Funct extends Expr {
-  def apply(exprs: Expr*) = App(this, exprs.toList)
-}
-case class Var(name: String) extends Funct {
-  def vars = Set(this)
-}
-case class OpVar(v: Var, args: List[Var], exprs: List[Expr]) extends Funct {
-  assert(exprs.size == args.size)
-  def vars = exprs.flatMap(_.vars).toSet -- args.toSet
-}
+
+// Integer expressions 
 case class Const(i: Int) extends Expr {
   def vars = Set()
 }
 sealed trait BinaryExpr extends Expr { 
+  assert (l.arity == 0 && r.arity == 0)
   def l: Expr
   def r: Expr 
   def vars = l.vars ++ r.vars
@@ -78,10 +72,6 @@ case class Plus(l: Expr, r: Expr) extends BinaryExpr
 case class Minus(l: Expr, r: Expr) extends BinaryExpr
 case class Times(l: Expr, r: Expr) extends BinaryExpr
 case class Div(l: Expr, r: Expr) extends BinaryExpr
-case class App(v: Funct, args: List[Expr]) extends Expr {
-  // TODO: arity checks (useful but not necessary)
-  def vars = args.flatMap(_.vars).toSet ++ v.vars
-}
 object Zero extends Expr {
   def vars = Set()
 }
@@ -89,12 +79,54 @@ case class Reduce(range: Seq, init: Expr = Zero) extends Expr {
   def vars = range.vars ++ init.vars
 }
 
+// Function application
+sealed trait Funct extends Expr {
+  def apply(exprs: Expr*) = App(this, exprs.toList)
+}
+case class Var(name: String, override val arity: Int = 0) extends Funct {
+  def vars = Set(this)
+  def increment(arity: Int = arity) = Var(Var.inc(name), arity)
+  def fresh = Var.fresh(arity)
+  def in(r: Range) = IntDomain(this, r)
+}
+object Var {
+  private var counter = 0
+  def fresh(arity: Int = 0) = {
+    counter = counter + 1
+    Var("$"+ counter)
+  }
+  private def inc(name: String): String = {
+    import java.util.regex._
+    val p = Pattern.compile("\\d+$");
+    val m = p.matcher(name);
+    if (m.find()) {
+      val i = m.group();
+      name.substring(0, name.size - i.size) + (i.toInt + 1)
+    } else {
+      name + "0"
+    }
+  }
+}
+case class OpVar(v: Var, args: List[Var], exprs: List[Expr]) extends Funct {
+  assert(v.arity == args.size && exprs.size == args.size, "wrong number of arguments in translation")
+  override def arity = v.arity
+  def vars = exprs.flatMap(_.vars).toSet -- args.toSet
+}
+case class App(v: Funct, args: List[Expr]) extends Expr {
+  assert(v.arity == args.size, "wrong number of arguments in app")
+  def vars = args.flatMap(_.vars).toSet ++ v.vars
+  def flatten = v match {
+    case OpVar(v, vargs, vexprs) =>
+      App(v, vexprs.map(Transform.substitute(_, vargs zip args)))
+    case _ => this
+  }
+}
 // Sequence of values to be reduced
 sealed trait Seq extends Term 
-case class Range(l: Expr, h: Expr) extends Seq {
+case class Range(l: Expr, h: Expr) {
   def vars = l.vars ++ h.vars
 }
-case class Compr(expr: Expr, v: Var, r: Seq) extends Seq {
+case class Compr(expr: Expr, v: Var, r: Range) extends Seq {
   def vars = r.vars ++ expr.vars + v
 }
 case class Join(l: Seq, r: Seq) extends Seq {
@@ -117,12 +149,12 @@ zero = 10000000000000000000000000000
 """
   // translate into python list/generator
   def print(s: Seq): String = s match {
-    case Range(l, h) => "range(" + print(l) + ", " + print(h) + ")"
     case Join(l, r) => print(l) + " + " + print(r)
-    case Compr(e, v, r) => "[" + print(e) + " for " + print(v) + " in " + print(r) + "]"
+    case Compr(e, v, Range(l, h)) => "[" + print(e) + " for " + print(v) + 
+      " in range(" + print(l) + ", " + print(h) + ")]"
   }
   def print(e: Expr): String = e match {
-    case Var(n) => n
+    case Var(n, _) => n
     case Const(i) => i.toString
     case Plus(l, r) => "(" + print(l) + " + " + print(r) + ")"
     case Minus(l, r) => "(" + print(l) + " - " + print(r) + ")"
@@ -167,11 +199,10 @@ object SMT {
   command("(declare-sort Seq 0)")
   command("(declare-fun zero () Int)")
   command("(declare-fun reduce (Seq Int) Int)")
-  command("(declare-fun range (Int Int) Seq)")
   command("(declare-fun join (Seq Seq) Seq)")
   
   def print(e: Expr): String = e match {
-    case Var(n) => n
+    case Var(n, _) => n
     case Const(i) => i.toString
     case Plus(l, r) => "(+ " + print(l) + " " + print(r) + ")"
     case Minus(l, r) => "(- " + print(l) + " " + print(r) + ")"
@@ -183,9 +214,8 @@ object SMT {
     case _: OpVar => ???
   }
   def print(s: Seq): String = s match {
-    case Range(l, h) => "range(" + print(l) + ", " + print(h) + ")"
     case Join(l, r) => "join(" + print(l) + ", " + print(r) + ")"
-    case Compr(e, v, r) => ???
+    case Compr(e, v, Range(l, h)) => ???
   }
   def print(p: Pred): String = p match {
     case True => "true"
@@ -199,13 +229,14 @@ object SMT {
     case LE(l, r) => "(<= " + print(l) + " " + print(r) + ")"
     case GE(l, r) => "(>= " + print(l) + " " + print(r) + ")"
   }
-  
+
   // Check for satisfaction
   def check(p: Pred) = {
     push()
     for (v <- p.vars) 
-      command("(declare-fun " + v.name + " () Int)")
-    println("solving " + p)
+      command("(declare-fun " + v.name + 
+        " (" + (1 to v.arity).map(_ => "Int").mkString(" ")+ ") Int)")
+    println(p)
     assert(print(p))
     val out = z3.check()
     pop()
@@ -222,12 +253,26 @@ case class Algorithm(v: Var,
   domain: List[Domain], 
   cases: List[(Pred, Expr)]) {
   override def toString = Python.print(this)
+  assert (v.arity == args.size)
   def args = domain.map(_.v)
   def pre = domain.map(_.pred).reduce(_ and _)
   def vars = 
     args.toSet ++ 
     domain.flatMap(_.pred.vars) ++ 
     cases.flatMap { case (p, e) => p.vars ++ e.vars } 
+
+  def translate(op: (Var, Expr)*) = {
+    val map = op.toMap
+    val dargs = args.map(_.increment())
+    val exprs = (args zip dargs).map {
+      case (arg, darg) => 
+        if (map.contains(arg)) 
+          Transform.substitute(map(arg), args zip dargs)
+        else
+          darg
+    }
+    OpVar(v, dargs, exprs)
+  }
 }
 sealed trait Domain {
   def v: Var
@@ -268,42 +313,61 @@ object Transform {
       case Zero => Zero
       case Reduce(range, init) => Reduce(transform(range), transform(init))
       case OpVar(v, args, exprs) => 
-        OpVar(transform(v).asInstanceOf[Var], args, exprs.map(transform(_)))
+        OpVar(transform(v).asInstanceOf[Var], args.map(transform(_).asInstanceOf[Var]), exprs.map(transform(_)))
     }
   def transform(s: Seq)(implicit f: PartialFunction[Expr, Expr]): Seq = 
     s match {
-      case Range(l, h) => Range(transform(l), transform(h))
-      case Compr(expr, v, r) => Compr(transform(expr), v, transform(r))
+      case Compr(expr, v, Range(l, h)) => 
+        Compr(transform(expr), transform(v).asInstanceOf[Var], 
+          Range(transform(l), transform(h)))
       case Join(l, r) => Join(transform(l), transform(r))
     }
 
-  private def increment(name: String): String = {
-    import java.util.regex._
-    val p = Pattern.compile("\\d+$");
-    val m = p.matcher(name);
-    if (m.find()) {
-      val i = m.group();
-      name.substring(0, name.size - i.size) + (i.toInt + 1)
-    } else
-      name + "0"
+  // apply f to all expressions with a path condition
+  def path(e: Expr)(implicit assumption: Pred, f: (Expr, Pred) => Unit) {
+    f(e, assumption)
+    e match {
+      case _: Var | _: Const | Zero =>
+      case e: BinaryExpr => path(e.l); path(e.r)
+      case App(v, args) => path(v); args.foreach(path(_))
+      case OpVar(v, args, exprs) => path(v); args.foreach(path(_)); exprs.foreach(path(_))
+      case Reduce(range, init) => path(init); path(range)
+    }
   }
 
-  def substitute(e: Expr, f: Map[Var, Expr]) = 
+  def path(s: Seq)(implicit assumption: Pred, f: (Expr, Pred) => Unit) {
+    s match {
+      case Join(a, b) => path(a); path(b)
+      case Compr(e, v, Range(l, h)) => 
+        path(l); path(h);
+        path(e)(assumption and l <= v and v < h, f);
+    }
+  }
+
+  def path(a: Algorithm)(implicit assumption: Pred, f: (Expr, Pred) => Unit) {
+    a.cases.foreach {
+      case (p, e) => path(e)(assumption and a.pre and p, f)
+    }
+  }
+
+  def substitute(e: Expr, f: Map[Var, Expr]): Expr = 
     transform(e) {
       case v: Var if f.contains(v) => f(v)
     }
 
-  def substitute(p: Pred, f: Map[Var, Expr]) =
+  def substitute(e: Expr, f: List[(Var, Expr)]): Expr = substitute(e, f.toMap)
+
+  def substitute(p: Pred, f: Map[Var, Expr]): Pred =
     transform(p) {
       case v: Var if f.contains(v) => f(v)
     }
-    
-  private def increment(v: Var): Var = Var(increment(v.name))
+   
+  def substitute(p: Pred, f: List[(Var, Expr)]): Pred = substitute(p, f.toMap)
  
   // These transformation are correct by construction
   def pushVars(vs: Var*): Algorithm => Algorithm = {
     case Algorithm(av, dom, cases) =>
-      val fresh = increment(av)
+      val fresh = av.increment(av.arity + vs.size)
       implicit def t: PartialFunction[Expr, Expr] = {
         case App(v, args) if v == av => App(fresh, args ::: vs.toList)
       }
@@ -312,9 +376,9 @@ object Transform {
       }) 
   }
   
-  def split(base: Pred, splits: Map[Var, Expr]): Algorithm => Algorithm = {
+  def split(base: Pred, splits: (Var, Expr)*): Algorithm => Algorithm = {
     case Algorithm(av, dom, cases) =>
-      val fresh = increment(av)
+      val fresh = av.increment(av.arity)
 
       // create specialized versions of alg by splitting the domain
       var parts: List[(Pred, Expr)] = Nil;
@@ -337,12 +401,11 @@ object Transform {
 
   def eliminate: Algorithm => Algorithm = {
     case a @ Algorithm(av, dom, cases) =>
-      Algorithm(increment(av), dom, cases.filter {
+      Algorithm(av.increment(), dom, cases.filter {
           case (pred, _) => SMT.check(a.pre and pred)
-      })      
+      })        
   }
 
-  import Console.println
 
 /*
   Rewrite operation c(v) = d(w)
@@ -364,8 +427,75 @@ object Transform {
   1) Prove d recursive calls satisfy induction.
   2) Replace d calls with c calls, may need to invert f and/or apply-unapply function transformations.
   3) Unify! Later on we can use theorem proving to make SMT do the job for us but for now we need to infer f.
-*/
+*/  
 
+  // Rewrite calls to d.v as d provided it's valid
+  def rewrite(c: Algorithm, op: (Var, Expr)*): Algorithm => Algorithm = {    
+    case Algorithm(v, dom, cases) =>
+      val d = c.translate(op: _*)
+      Algorithm(v.increment(), dom, cases.map {
+        case (pred, expr) => (pred, 
+          if (proveInd(pred, c, d)) {
+            transform(expr) {
+              case App(w, args) if w == c.v => App(d, args).flatten
+            }
+          } else {
+            expr
+          })
+      })      
+  }
+
+  // Prove by induction that pred(v) => c(v) = c(f(v)) where d = OpVar(c, f)
+  def proveInd(pred: Pred, c: Algorithm, d: OpVar): Boolean = {
+    assert (d.v == c.v)
+    // check domains: d is well defined at p and c.pre
+    if (SMT.check(pred and c.pre and ! substitute(c.pre, 
+      c.args zip App(d, c.args).flatten.args))) {
+      println("*** failed domain check")
+      return false
+    }
+
+    // check that inductive calls satisfy pred
+    path(c)(pred, 
+      (e, path) => e match {
+        case a @ App(v, args) if v == c.v =>
+          if (SMT.check(path and ! substitute(pred, c.args zip args))) {
+            println("*** failed inductive step check")
+            return false
+          }
+        case _ =>
+      })
+   
+    // prove by induction on v
+    // inductive step
+    // ind is an uninterpreted version of c for the inductive step
+    val ind = Var("$ind", c.v.arity)
+    for ((p, e) <- c.cases) {
+      val ce = transform(e) {
+        case App(v, args) if v == c.v =>
+          // unroll with d to ind
+          App(d, args).flatten match {
+            case App(v, args) => assert(v == c.v); App(ind, args)
+          }
+      }
+      val de = transform(substitute(e, c.args zip App(d, c.args).flatten.args)) {
+        case App(v, args) if v == c.v => App(ind, args)
+      }
+      if (SMT.check(pred and c.pre and p and !(ce === de))) {
+        println("*** failed to prove equation equality")
+        println(ce)
+        println(de)
+        return false
+      }
+    }
+
+    // base case
+    // TODO
+    true
+  }
+
+
+/*
   // d is applied to f(c_args)
   // f provides map from arguments of d to expressions of c
   def unify(p: Pred, c: Algorithm, d: Algorithm, subs: (Var, Expr)*) = {
@@ -400,8 +530,9 @@ object Transform {
         None
     }
   }
+*/
 }
-
+/*
 object Contradiction extends RuntimeException
 class Unification(val C: Algorithm, val D: Algorithm, var subs: Map[Var, Expr]) {
   var vars = D.vars
@@ -442,7 +573,7 @@ class Unification(val C: Algorithm, val D: Algorithm, var subs: Map[Var, Expr]) 
         // avoid inversing f, commuting diagram  
         for ((formal, actual) <- D.args zip dargs) {
           val da = unified(actual)
-          val dc = substitute(mask(formal), (C.args zip cargs).toMap)
+          val dc = substitute(mask(formal), C.args zip cargs)
           if (da != dc && SMT.check(! (da === dc)))
             throw Contradiction          
         }
@@ -516,30 +647,29 @@ class Unification(val C: Algorithm, val D: Algorithm, var subs: Map[Var, Expr]) 
 
   override def toString = mask.toString
 }
-
+*/
 
 object Parenthesis {
   implicit def int2expr(i: Int) = Const(i)
 
   val i = Var("i")
   val j = Var("j")  
-  val c = Var("c")
-  val k1 = Var("k1")
-  val k2 = Var("k2")
+  val c = Var("c", 2)
+  val k = Var("k")
 
-  val w = Var("w")
-  val x = Var("x")
+  val w = Var("w", 3)
+  val x = Var("x", 1)
   val n = Var("n")
-  val C = Algorithm(c, 
+  val C = new Algorithm(c, 
     List(
-      IntDomain(i, Range(0, n)), 
-      IntDomain(j, Range(i+1, n))
+      i in Range(0, n), 
+      j in Range(i+1, n)
     ), 
     List(
       (i === j - 1, x(j)),
       (True, Reduce(Join(
-        Compr(c(i, k1) + c(k1, j), k1, Range(i+1, j)),
-        Compr(w(i, k2, j), k2, Range(i+1, j))
+        Compr(c(i, k) + c(k, j), k, Range(i+1, j)),
+        Compr(w(i, k, j), k, Range(i+1, j))
       )))
     )
   )
@@ -553,20 +683,21 @@ object Parenthesis {
     val C0 = pushVars(n, w, x)(C)
     println(C0)
 
-    val C1 = split(n < 4, Map(i -> n/2, j -> n/2))(C0)
+    val C1 = split(n < 4, i -> n/2, j -> n/2)(C0)
     println(C1)
 
     val C2 = eliminate(C1)
     println(C2)
 
-    println(unify(i < n/2 and j < n/2, C0, C0,
-      n -> n/2))
+    val C3 = rewrite(C0, n -> n/2)(C2)
+    println(C3)
 
+    /*
     println(unify(i >= n/2 and j >= n/2, C0, C0, 
       i -> (i-n/2), j -> (j-n/2), n -> n/2,
       x -> OpVar(x, List(j), List(j+n)),
       w -> OpVar(w, List(i, k1, j), List(i+n, k1+n, j+n))))
-
+    */
     SMT.close()
   }
 }
