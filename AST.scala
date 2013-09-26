@@ -109,7 +109,7 @@ object Var {
   private var counter = 0
   def fresh(prefix: String = "_v", arity: Int = 0) = {
     counter = counter + 1
-    Var(prefix+ counter, arity)
+    Var(prefix + counter, arity)
   }
   private def inc(name: String): String = {
     import java.util.regex._
@@ -415,50 +415,40 @@ object Transform {
   def substitute(p: Pred, f: List[(Var, Expr)]): Pred = substitute(p, f.toMap)
  
   // These transformation are correct by construction
-  def generalize(ds: Var*) = (a: Algorithm) => {    
+  def generalize(ds: (Var,Var)*) = (a: Algorithm) => {    
+    val map = ds.toMap
     val fresh = a.v.increment(a.v.arity + ds.size)
-    def t: PartialFunction[Term, Term] = {
-      case App(v, args) if v == a.v => App(fresh, args ::: ds.toList)
-    }
-    Algorithm(fresh, a.args ::: ds.toList, a.pre, a.cases.map { 
-        case (pred, expr) => (transform(pred)(t), transform(expr)(t))
+    Algorithm(fresh, a.args ++ map.values.toList, a.pre, transform(a) { 
+        case App(v, args) if v == a.v => App(fresh, args ++ map.values)
+        case v: Var if map.contains(v) => map(v)
     }) 
   }
-
-  def generalizeEach(v: Var) = (a: Algorithm) => {
-    var vs: List[Var] = Nil
-    val cases = transform(a) {
-      case w: Var if v == w => 
-        val u = v.fresh
-        vs = u :: vs
-        u
-    }
-    Algorithm(a.v.increment(a.v.arity + vs.size), a.args ++ vs, a.pre, cases)
-  }
   
-  def split(base: Pred, splits: (Var, Expr)*) = (a: Algorithm) => {    
+  def split(base: Pred, splits: Pred*) = (a: Algorithm) => {    
     // create specialized versions of alg by splitting the domain
-    var parts: List[(Pred, Expr)] = Nil;
-    def rec(vs: List[(Var, Expr)], prefix: Pred = True) {
-      vs match {
-        case Nil => parts = (prefix, App(a.v, a.args)) :: parts
-        case v :: vs => 
-          rec(vs, prefix and v._1 < v._2)
-          rec(vs, prefix and v._1 >= v._2)
-      }        
+    var cases: List[(Pred, Expr)] = Nil;
+    var calls: List[Algorithm] = Nil
+
+    def explore(mask: List[Boolean] = Nil) {
+      if (mask.size == splits.size) {
+        val p = (mask.reverse zip splits.toList) map {
+          case (b, split) => if (b) split else !split
+        } reduce (_ and _)
+        if (SMT.check(a.pre and p)) {
+          val b = Algorithm(Var(a.v.name+"s"+mask.reverse.map(if (_) "0" else "1").mkString +"_", a.v.arity),
+            a.args, a.pre and p, List((True, App(a.v, a.args))))
+          cases = (p, App(b.v, a.args)) :: cases
+          calls = b :: calls
+        }
+      } else {
+        explore(true :: mask)
+        explore(false :: mask)
+      }
     }
-
-    rec(splits.toList)
+    explore()
     
-    a.make(_ => (base, App(a.v, a.args)) :: parts.reverse)
+    a.make(_ => (base, App(a.v, a.args)) :: cases.reverse) :: calls.reverse
   }
-
-  def eliminate = (a: Algorithm) =>
-    a.make(_.filter {
-        case (pred, _) => SMT.check(a.pre and pred)
-    })        
-  
-
 
 /*
   Rewrite operation c(v) = d(w)
@@ -487,7 +477,7 @@ object Transform {
     val d = c.translate(op: _*)  
     a.make(_.map {
         case (pred, expr) => (pred, 
-          if (proveInd(pred, c, d)) {
+          if (proveInd(a.pre and pred, c, d)) {
             transform(expr) {
               case App(w, args) if w == c.v => App(d, args).flatten
             }
@@ -550,40 +540,29 @@ object Transform {
   }
 
 
-  // Replace calls to c with calls to a provided ind decreases and pre-condition is satisfied
-  def refine(c: Algorithm, ind: Expr) = (a: Algorithm) => {
-    val fresh = a.v.increment()
-    Algorithm(fresh, a.args, a.pre, walk(a)({ (e, path) => 
+  // Replace calls to c with calls to c1 provided ind decreases and its pre-condition is satisfied
+  // c1 is a refinement and/or restriction of c0
+  // TODO: induction should be a global metric on all algorithms
+  def refine(c: Algorithm, c1: Algorithm, ind: Expr) = {
+    assert(c.args == c1.args)
+    (a: Algorithm) => 
+    a.make(_ => walk(a)({ (e, path) => 
       e match {          
         case app @ App(v, args) if v == c.v =>
-          if (SMT.check(path and ! (substitute(ind, c.args zip args) < ind)))
+          if (SMT.check(path and ! (substitute(ind, c.args zip args) < ind))) {
+            println("** can't refine because induction fails")
             None
-          else if (SMT.check(path and ! substitute(a.pre, a.args zip args)))
+          } else if (SMT.check(path and ! (substitute(c1.pre, c1.args zip args)))) {
+            println("** can't refine because pre fails")
             None
-          else
-            Some(App(fresh, args))
+          } else
+            Some(App(c1.v, args))
         case _ => 
           None
       }}, True))          
   }
-
-  // Create two algorithm: one for the specific case, another with the case replaced by itself
-  def specialize(k: Int, n: String) = (a: Algorithm) => {
-    var i = -1
-    var b: Algorithm = a
-    val a1 = a.make(_.map {
-        case (p, e) => 
-        i = i + 1
-        if (i == k) {
-          b = Algorithm(Var(n, a.v.arity), a.args, a.pre and p, List((True, e)))
-          (p, b.v(a.args:_*))
-        } else {
-          (p, e)
-        }
-      })
-    (a1, b)          
-  }
   
+
   def unfold(c: Algorithm) = (a: Algorithm) =>
     a.make(_.flatMap {
         case (p, App(v, args)) if v == c.v =>
@@ -637,44 +616,68 @@ object Parenthesis {
     import Transform._
     println(C)
 
-    val c0 = generalize(n, w, x)(C)
+    val c0 = generalize(n->n, w->w, x->x)(C)
     println(c0)
 
-    val c1 = split(n < 4, i -> n/2, j -> n/2)(c0)
+    val List(c1, c000, c001, c011) = split(n < 4, i < n/2, j < n/2)(c0)
     println(c1)
-
-    val c2 = eliminate(c1)
-    println(c2)
-
-    val c3 = rewrite(c0, n -> n/2)(c2)
-    println(c3)
+    println(c000)
+    println(c001)
+    println(c011)
+    
+    val cs1 = rewrite(c0, n -> n/2)(c000)
+    println(cs1)
+    val cs11 = refine(c0, c1, n)(cs1)
+    println(cs11)
  
     // domain check fails for n = 3, i = 1, j = 2
     // use free assumption n mod 2 = 0
   
-    val c4 = rewrite(c0, i -> (i-n/2), j -> (j-n/2), n -> n/2, 
+    val cs3 = rewrite(c0, i -> (i-n/2), j -> (j-n/2), n -> n/2, 
       x -> x.translate(List(j), j->(j+n/2)), 
-      w -> w.translate(List(i, j, k), i->(i+n/2), j->(j+n/2), k->(k+n/2)))(c3)
-    println(c4)
+      w -> w.translate(List(i, j, k), i->(i+n/2), j->(j+n/2), k->(k+n/2)))(c011)
+    println(cs3)
+    
+    // hard case
 
-    val c5 = refine(c0, n)(c4)
-    println(c5)
+    val cs31 = refine(c0, c1, n)(cs3)
+    println(cs31)
 
-    val (c6, b) = specialize(2, "B")(c5)
-    println(c6)
+    val b = unfold(c0)(c001)
     println(b)
 
-    val b0 = unfold(c0)(b)
-    println(b0)
-
-    val b1 = splitRange(k, n/2)(b0)
+    val b1 = splitRange(k, n/2)(b)
     println(b1)
 
-    val b2 = refine(c0, j-i)(b1)
+    val b2 = 
+      (refine(c0, cs11, j-i) andThen
+      refine(c0, cs31, j-i))(b1)
     println(b2)
 
-    val b3 = generalizeEach(c0.v)(b2)
+    val b3 = refine(c0, b2, j-i)(b2)
     println(b3)
+
+    val s = Var("s", 5)
+    val t = Var("t", 5)
+    val b4 = generalize(cs11.v->s, cs31.v->t)(b3)
+    println(b4)
+
+    val List(b5, b00, b01, b10, b11) = split(n < 8, i < n/4, j < n/2+n/4)(b4)
+    println(b5)
+    println(b00)
+    println(b01)
+    println(b10)
+    println(b11)
+
+    val b100 = rewrite(b4, 
+        i->(i-n/4),
+        j->(j-n/4),
+        n->n/2,
+        w->w.translate(List(i,j,k), i->(i+n/4),j->(j+n/4),k->(k+n/4)),
+        x->x.translate(List(i), i->(i+n/4)),
+        s->s.translate(List(i,j,n,w,x), i->(i+n/4), j->(j+n/4)),        
+        t->t.translate(List(i,j,n,w,x), i->(i+n/4), j->(j+n/4)))(b10)
+    println(b100)
 
     SMT.close()
   }
