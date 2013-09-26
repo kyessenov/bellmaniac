@@ -69,7 +69,7 @@ class Z3 extends Solver {
     case None => System.getProperty("user.home") + "/opt/z3/bin/z3"
   }
 
-  private def PARAMS ="-smt2" :: "-in" :: Nil
+  private def PARAMS ="-smt2" :: "-in" :: "-nw" :: Nil
 
   private var process = {
     val pb = new ProcessBuilder((BINARY :: PARAMS).toArray: _*);
@@ -85,10 +85,13 @@ class Z3 extends Solver {
 
   command("(set-option :print-success true)")
   command("(set-option :produce-models true)")
-  command("(set-option :elim-quantifiers true)")
-  command("(set-option :mbqi false)")
-  command("(set-option :auto-config false)") // disable saturation engine, use all theories
-  command("(set-option :ematching false)")
+  //command("(set-option :elim-quantifiers true)")
+  //command("(set-option :ematching false)")
+  
+  // Disable MBQI
+  // See: http://stackoverflow.com/questions/17706219/defining-a-theory-of-sets-with-z3-smt-lib2 
+  //command("(set-option :mbqi false)")
+  //command("(set-option :auto-config false)") 
 
   override def close() {
     input.close; 
