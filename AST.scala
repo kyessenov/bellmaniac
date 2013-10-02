@@ -57,6 +57,10 @@ sealed trait Expr extends Term {
   def >=(that: Expr) = GE(this, that)
   override def toString = Python.print(this)
   def arity = 0
+  def where(v: Var) = {
+    val that = this
+    new { def in(r: Range) = Compr(that, v, r) }
+  }
 }
 
 // Integer expressions 
@@ -89,8 +93,6 @@ case class Var(name: String, override val arity: Int = 0) extends Funct {
   def vars = Set(this)
   def increment(arity: Int = arity) = Var(Var.inc(name), arity)
   def fresh = Var.fresh(name, arity)
-  def in(r: Range) = r.l <= this and this < r.h
-
   def translate(args: List[Var], op: (Var, Expr)*) = {
     assert (arity > 0)
     val map = op.toMap
@@ -138,8 +140,10 @@ case class App(v: Funct, args: List[Expr]) extends Expr {
     case _ => this
   }
 }
-// Sequence of values to be reduced
-sealed trait Seq extends Term 
+// Sequence of (one-dimensional) values to be reduced
+sealed trait Seq extends Term {
+  def ++(that: Seq) = Join(this, that)
+}
 case class Range(l: Expr, h: Expr) {
   def vars = l.vars ++ h.vars
 }
@@ -148,6 +152,9 @@ case class Compr(expr: Expr, v: Var, r: Range) extends Seq {
 }
 case class Join(l: Seq, r: Seq) extends Seq {
   def vars = l.vars ++ r.vars
+}
+case class Singleton(e: Expr) extends Seq {
+  def vars = e.vars
 }
 
 object Python {
@@ -166,6 +173,7 @@ zero = 10000000000000000000000000000
 """
   // translate into python list/generator
   def print(s: Seq): String = s match {
+    case Singleton(e) => "[" + print(e) + "]"
     case Join(l, r) => print(l) + " + " + print(r)
     case Compr(e, v, Range(l, h)) => "[" + print(e) + " for " + print(v) + 
       " in range(" + print(l) + ", " + print(h) + ")]"
@@ -244,6 +252,7 @@ object SMT {
     }
   }
   def print(s: Seq)(implicit side: ListBuffer[String]): String = s match {
+    case Singleton(e) => ???
     case Join(l, r) => "(join " + print(l) + " " + print(r) + ")"
     case Compr(e, v, Range(l, h)) =>
       /* TODO: not working, use dumb approximation
@@ -307,15 +316,14 @@ object SMT {
 }
 
 // Recursive algorithm definition
+// TODO: we only need values for certain inputs, part of the spec
 case class Algorithm(v: Var, args: List[Var], pre: Pred, cases: List[(Pred, Expr)]) {
   override def toString = Python.print(this)
   assert (v.arity == args.size)
-
   def vars = 
     args.toSet ++ 
     pre.vars ++ 
     cases.flatMap { case (p, e) => p.vars ++ e.vars } 
-
   def excluded = {
     var els: Pred = True
     cases.map {
@@ -325,77 +333,77 @@ case class Algorithm(v: Var, args: List[Var], pre: Pred, cases: List[(Pred, Expr
         out
     }
   }
-
   def translate(op: (Var, Expr)*) = v.translate(args, op: _*)
   def make(f: List[(Pred, Expr)] => List[(Pred, Expr)]) = 
     Algorithm(v.increment(), args, pre, f(cases))
 }
 
 object Transform { 
-  def walk(p: Pred)(implicit f: Function2[Term, Pred, Option[Term]], path: Pred): Pred = 
+  def visit(p: Pred)(implicit f: Function2[Term, Pred, Option[Term]], path: Pred): Pred = 
     f(p, path) match {
       case Some(out) => out.asInstanceOf[Pred]
       case None => p match {
         case True => True
         case False => False
-        case And(l, r) => And(walk(l), walk(r))
-        case Or(l, r) => Or(walk(l), walk(r))
-        case Not(l) => Not(walk(l))
-        case Eq(l, r) => Eq(walk(l), walk(r))
-        case LT(l, r) => LT(walk(l), walk(r))
-        case GT(l, r) => GT(walk(l), walk(r))
-        case LE(l, r) => LE(walk(l), walk(r))
-        case GE(l, r) => GE(walk(l), walk(r))
+        case And(l, r) => And(visit(l), visit(r))
+        case Or(l, r) => Or(visit(l), visit(r))
+        case Not(l) => Not(visit(l))
+        case Eq(l, r) => Eq(visit(l), visit(r))
+        case LT(l, r) => LT(visit(l), visit(r))
+        case GT(l, r) => GT(visit(l), visit(r))
+        case LE(l, r) => LE(visit(l), visit(r))
+        case GE(l, r) => GE(visit(l), visit(r))
       }
     }
 
-  def walk(e: Expr)(implicit f: Function2[Term, Pred, Option[Term]], path: Pred): Expr = 
+  def visit(e: Expr)(implicit f: Function2[Term, Pred, Option[Term]], path: Pred): Expr = 
     f(e, path) match {
       case Some(out) => out.asInstanceOf[Expr]
       case None => e match {
         case _: Var => e
         case _: Const => e
-        case Plus(l, r) => Plus(walk(l), walk(r))
-        case Minus(l, r) => Minus(walk(l), walk(r))
-        case Times(l, r) => Times(walk(l), walk(r))
-        case Div(l, r) => Div(walk(l), walk(r))
-        case Mod(l, r) => Mod(walk(l), walk(r))
+        case Plus(l, r) => Plus(visit(l), visit(r))
+        case Minus(l, r) => Minus(visit(l), visit(r))
+        case Times(l, r) => Times(visit(l), visit(r))
+        case Div(l, r) => Div(visit(l), visit(r))
+        case Mod(l, r) => Mod(visit(l), visit(r))
         case App(v, args) => 
-          App(walk(v).asInstanceOf[Funct], args.map(walk(_)))
+          App(visit(v).asInstanceOf[Funct], args.map(visit(_)))
         case Zero => Zero
-        case Reduce(range, init) => Reduce(walk(range), walk(init))
+        case Reduce(range, init) => Reduce(visit(range), visit(init))
         case OpVar(v, args, exprs) => 
-          OpVar(walk(v).asInstanceOf[Var], args.map(walk(_).asInstanceOf[Var]), exprs.map(walk(_)))
+          OpVar(visit(v).asInstanceOf[Var], args.map(visit(_).asInstanceOf[Var]), exprs.map(visit(_)))
       }
     }
 
-  def walk(s: Seq)(implicit f: Function2[Term, Pred, Option[Term]], path: Pred): Seq = 
+  def visit(s: Seq)(implicit f: Function2[Term, Pred, Option[Term]], path: Pred): Seq = 
     f(s, path) match {
       case Some(out) => out.asInstanceOf[Seq]
       case None => s match {
         case Compr(expr, v, Range(l, h)) => 
-          Compr(walk(expr)(f, path and (l <= v and v < h)), walk(v).asInstanceOf[Var], 
-            Range(walk(l), walk(h)))
-        case Join(l, r) => Join(walk(l), walk(r))
+          Compr(visit(expr)(f, path and (l <= v and v < h)), visit(v).asInstanceOf[Var], 
+            Range(visit(l), visit(h)))
+        case Join(l, r) => Join(visit(l), visit(r))
+        case Singleton(e) => Singleton(visit(e))
       }
     }
 
-  def walk(a: Algorithm)(implicit f: Function2[Term, Pred, Option[Term]], path: Pred): List[(Pred, Expr)] = 
+  def visit(a: Algorithm)(implicit f: Function2[Term, Pred, Option[Term]], path: Pred): List[(Pred, Expr)] = 
     a.cases.map {
-      case (p, e) => (walk(p)(f, path and a.pre), walk(e)(f, path and a.pre and p))
+      case (p, e) => (visit(p)(f, path and a.pre), visit(e)(f, path and a.pre and p))
     }      
 
-  def transform(e: Expr)(f: PartialFunction[Term, Term]): Expr = walk(e)({
+  def transform(e: Expr)(f: PartialFunction[Term, Term]): Expr = visit(e)({
     case (te, _) if f.isDefinedAt(te) => Some(f(te))
     case _ => None    
   }, True)
 
-  def transform(p: Pred)(f: PartialFunction[Term, Term]): Pred = walk(p)({
+  def transform(p: Pred)(f: PartialFunction[Term, Term]): Pred = visit(p)({
     case (te, _) if f.isDefinedAt(te) => Some(f(te))
     case _ => None    
   }, True)
 
-  def transform(a: Algorithm)(f: PartialFunction[Term, Term]): List[(Pred, Expr)] = walk(a)({
+  def transform(a: Algorithm)(f: PartialFunction[Term, Term]): List[(Pred, Expr)] = visit(a)({
     case (te, _) if f.isDefinedAt(te) => Some(f(te))
     case _ => None    
   }, True)
@@ -499,7 +507,7 @@ object Transform {
     }
 
     // check that inductive calls satisfy pred
-    walk(c)({ (e, path) => 
+    visit(c)({ (e, path) => 
       e match {
         case a @ App(v, args) if v == c.v =>
           if (SMT.check(path and ! substitute(pred, c.args zip args))) {
@@ -546,7 +554,7 @@ object Transform {
   def refine(c: Algorithm, c1: Algorithm, ind: Expr) = {
     assert(c.args == c1.args)
     (a: Algorithm) => 
-    a.make(_ => walk(a)({ (e, path) => 
+    a.make(_ => visit(a)({ (e, path) => 
       e match {          
         case app @ App(v, args) if v == c.v =>
           if (SMT.check(path and ! (substitute(ind, c.args zip args) < ind))) {
@@ -583,34 +591,25 @@ object Transform {
           Join(Compr(substitute(e, Map(v->v1)), v1, Range(l, mid)), 
               Compr(substitute(e, Map(v->v2)), v2, Range(mid, h)))
       })
-    })
-  
+    }) 
 }
 
 object Parenthesis {
+  import Prelude._
   implicit def int2expr(i: Int) = Const(i)
 
-  val i = Var("i")
-  val j = Var("j")  
   val c = Var("c", 2)
-  val k = Var("k")
-  val l = Var("l")
-
   val w = Var("w", 3)
   val x = Var("x", 1)
-  val n = Var("n")
-  val C = Algorithm(c, List(i, j), 
-    (i in Range(0, n)) and (j in Range(i+1, n)), 
+  
+  val C = Algorithm(c, i :: j :: Nil, 
+    0 <= i and i < n and i+1 <= j and j < n, 
     List(
-      (i === j - 1, x(j)),
-      (True, Reduce(Join(
-        Compr(c(i, k) + c(k, j), k, Range(i+1, j)),
-        Compr(w(i, l, j), l, Range(i+1, j))
-      )))
-    )
-  )
-
-
+      (i === j - 1) -> x(j),
+      True -> Reduce(
+        (c(i, k) + c(k, j) where k in Range(i+1, j)) ++ 
+        (w(i, l, j) where l in Range(i+1, j)))))
+    
   def main(args: Array[String]) {
     import Console.println
     import Transform._
@@ -681,4 +680,56 @@ object Parenthesis {
 
     SMT.close()
   }
+}
+
+object Gap {
+  import Prelude._
+  implicit def int2expr(i: Int) = Const(i)
+  implicit def expr2singleton(e: Expr) = Singleton(e)
+
+  val w = Var("w", 2)
+  val w1 = Var("w1", 2)
+  val S = Var("S", 2)
+  val g = Var("g", 2)
+
+  val G = Algorithm(g, i :: j :: Nil,
+    0 <= i and i <= n and 0 <= j and j <= n,
+    List(
+      (i === 0 and j === 0) -> 0,
+      (i === 0 and j > 0) -> w(0, j),
+      (i > 0 and j === 0) -> w1(0, i),
+      (i > 0 and j > 0) -> Reduce(
+        (g(i, q) + w(q, j) where q in Range(0, j)) ++
+        (g(p, j) + w1(p, i) where p in Range(0, i)) ++
+        (g(i-1, j-1) + S(i, j)))))
+}
+
+object Floyd {
+  import Prelude._ 
+  implicit def int2expr(i: Int) = Const(i)
+
+  val l = Var("l", 2)
+  val d = Var("d", 3)
+
+  // TODO: custom operators
+  val D = Algorithm(d, i :: j :: k :: Nil,
+    0 <= i and i < n and
+    0 <= j and j < n and
+    0 <= k and k <= n,
+    List(
+      (k === 0) -> l(i, j),
+      True -> (d(i, j, k-1) + d(i, k-1, k-1) * d(k-1, j, k-1))))
+}
+
+
+object Prelude {
+  val i = Var("i")
+  val j = Var("j") 
+  val k = Var("k")
+  val l = Var("l")
+  val m = Var("m")
+  val n = Var("n")
+  val o = Var("o")
+  val p = Var("p")
+  val q = Var("q")
 }
