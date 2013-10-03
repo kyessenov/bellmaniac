@@ -85,13 +85,13 @@ class Z3 extends Solver {
 
   command("(set-option :print-success true)")
   command("(set-option :produce-models true)")
-  //command("(set-option :elim-quantifiers true)")
-  //command("(set-option :ematching false)")
+  command("(set-option :elim-quantifiers true)")
+  command("(set-option :ematching false)")
   
   // Disable MBQI
   // See: http://stackoverflow.com/questions/17706219/defining-a-theory-of-sets-with-z3-smt-lib2 
-  //command("(set-option :mbqi false)")
-  //command("(set-option :auto-config false)") 
+  command("(set-option :mbqi false)")
+  command("(set-option :auto-config false)") 
 
   override def close() {
     input.close; 
