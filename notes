@@ -1,0 +1,20 @@
+  Rewrite operation c(v) = d(w)
+  To make it feasible, we restrict to the following form
+    "p(v) => c(v) = d(f(v))"
+  where f is the translation operator consisting of affine transformations,
+  lift-translate transformations of the argument functions, and combination thereof.
+  p is an arbitrary predicate.
+
+  Given that c and d are defined inductively, we prove this by induction on v.
+  Two main arguments:
+  1) base case
+  2) inductive cases v -> v1,v2,...,vk
+    (some of the vi cases may not satisfy p, in which case nothing is known)
+
+  p and c are given. d is chosen from a small set of functions. We'd like f to be inferred.
+
+  The strategy is to use direct unification of d expression with c.
+  1) Prove d recursive calls satisfy induction.
+  2) Replace d calls with c calls, may need to invert f and/or apply-unapply function transformations.
+  3) Unify! Later on we can use theorem proving to make SMT do the job for us but for now we need to infer f.
+
