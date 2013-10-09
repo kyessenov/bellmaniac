@@ -1,3 +1,4 @@
+// Rational number
 case class Rational(n: Int, d: Int) {
   assert(d != 0)
   private def gcd(x: Int, y: Int): Int = {
@@ -32,9 +33,8 @@ case class Rational(n: Int, d: Int) {
 
   def expr = Const(numer) / Const(denom)
 }
-
-trait Operator 
-case class Linear(terms: Map[Var, Rational], free: Rational) extends Operator {
+// Rational linear combination
+case class Linear(terms: Map[Var, Rational], free: Rational) {
   import Linear.{zero, one}
 
   def expr = 
@@ -87,4 +87,6 @@ object Linear {
     }
 }
 
-case class LinearOp(args: List[Var], op: List[Operator]) extends Operator
+class LinearOp(args: List[Var]) {
+  // TODO: generate translation forms
+}

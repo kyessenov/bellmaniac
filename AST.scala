@@ -257,7 +257,7 @@ object SMT {
       val v = Var.fresh()
       side += "(declare-const " + v.name + " Int)"
       print(v)
-    case Reduce(r, init) => "(reduce " + print(r) + " " + init + ")"
+    case Reduce(r, init) => "(reduce " + print(r) + " " + print(init) + ")"
     case a: App => a.flatten match {
       case App(Var(n, k), args) => "(" + n + " " + args.map(print(_)).mkString(" ") + ")"
       case _ => ???
@@ -424,6 +424,14 @@ class Refinement() {
  
   import Transform._
 
+  def algorithm(v: Var) = algs.find(_.v == v)
+  def arguments(v: Var) = algorithm(v) match {
+    case Some(alg) => alg.args
+    case None => 
+      // assume all arguments are zero arity
+      (1 to v.arity).map(i => Var.fresh((+'i' + i).toChar.toString, 0)).toList
+  }
+
   override def toString = 
     algs.map(_.toString).mkString("\n")
 
@@ -485,14 +493,23 @@ class Refinement() {
       }) 
     }
 
-  // Variable renaming
-  def rename(name: String, vs: (Var, String)*) =
+  // Generalize variable application
+  def genApp(name: String, vs: (Var, App)*) =
     step {
       case Algorithm(v, args, pre, e) =>
-        val m = vs.toList.map { case (v, name) => (v, Var(name, v.arity)) }
-        Algorithm(Var(name, v.arity), args.map(_.s(m).asInstanceOf[Var]), pre.s(m), e.s(m)) 
+        val m = vs.toMap
+        Algorithm(Var(name, v.arity), args, pre, transform(e) {
+          case App(w: Var, args) if m.contains(w) => m(w)            
+        }) 
     }
-  
+
+  def unchecked(from: Expr, to: Expr) = 
+    step {
+      case Algorithm(v, args, pre, e) => Algorithm(v, args, pre, transform(e) {
+        case x if x == from => to
+      })
+    }
+
   // Create specialized versions of alg by splitting the domain
   def partition(name: String, base: Pred, splits: Pred*) = 
     multiStep {
@@ -545,17 +562,23 @@ class Refinement() {
   // Complete OpVar of c based on op
   import collection.mutable.ListBuffer
   def unify(c: Algorithm, op: (Var, Expr)*) {
-    val map = op.toMap
+    val map = op.toMap   
     val cvs = c.args
+    // assume we are given all 0-arity variables
+    // now infer remaining linear operators (including c itself)
+    var operators = Map[Var, LinearOp]()
     val dvs = cvs.map { v =>
       if (map.contains(v)) 
         map(v)
-      else
+      else {
+        assert (v.arity > 0, "0-arity var " + v + " requires user input")
+        val w = v.fresh
+        operators += w -> new LinearOp(arguments(v))
         v.fresh
+      }
     }
     implicit val buf = new ListBuffer[Pred]
     unify(c.expr, c.expr.s(cvs zip dvs))   
-    buf.foreach(println(_))
   }
 
   // Relaxed unification
@@ -699,8 +722,8 @@ object Parenthesis {
 
     def $ = Var.fresh().name
     
-    val r = new Refinement()
-    import r._
+    val refinement = new Refinement()
+    import refinement._
 
     induction(C, j - i, 0)
     val c0 = introduce("c0", n, w, x)(C)
@@ -710,32 +733,47 @@ object Parenthesis {
     val c111 = rewrite("c111", c0, i -> (i-n/2), j -> (j-n/2), n -> n/2, 
       x -> x.translate(List(j), j->(j+n/2)), 
       w -> w.translate(List(i, j, k), i->(i+n/2), j->(j+n/2), k->(k+n/2)))(c011)
-    unify(c0, i->(i-n/2), j->(j-n/2), n->n/2)
-    /*
-    val R = Var("R", 2)
-    val b0 = (unfold($, c0) andThen genZero($, R(i, j)) andThen introduce("b0", R))(c001)  
+    // TODO:
+    // inferring offsets in i and j requires using the precondition in addition
+    // to the symbolic unification
+    // unify(c0, i->(i-n/2), j->(j-n/2), n->n/2)
+    
+    val r = Var("r", 2)
+    val b0 = (unfold($, c0) andThen 
+      genZero($, r(i, j)) andThen 
+      introduce("b0", r))(c001)  
     val b1 = splitRange("b1", k, n/2)(b0)
     val b2 = refine("b2", c0, c100)(b1)
     val b3 = refine("b3", c0, c111)(b2)
-    val b4 = introduce("b4", c100.v, c111.v)(b3)
-    val b = rename("b", c100.v->"s", c111.v->"t")(b4)
-    val s = Var("s", 5)
-    val t = Var("t", 5)
-    
+    val s = Var("s", 2)
+    val t = Var("t", 2)
+    val k1 = Var("k1")
+    val k2 = Var("k2")
+    var b = (introduce($, s, t) andThen 
+      genApp($, c100.v->s(i, k1)) andThen 
+      genApp("b", c111.v->t(k2, j)))(b3)
+    // todo: re-apply c0 -> b to recursive applications
+    b = (unchecked(c0.v(k1, j, n, w, x), b.v(k1, j, n, w, x, r, s, t)) andThen
+      unchecked(c0.v(i, k2, n, w, x), b.v(i, k2, n, w, x, r, s ,t)))(b)
+   
     val List(b5, b00, b01, b10, b11) = partition("b5", n < 8, i < n/4, j < n/2+n/4)(b)
-
-    
-    val b100 = rewrite(b4, 
+       
+    val b100 = rewrite("b100", b,
         i->(i-n/4),
         j->(j-n/4),
         n->n/2,
         w->w.translate(List(i,j,k), i->(i+n/4),j->(j+n/4),k->(k+n/4)),
         x->x.translate(List(i), i->(i+n/4)),
-        s->s.translate(List(i,j,n,w,x), i->(i+n/4), j->(j+n/4)),        
-        t->t.translate(List(i,j,n,w,x), i->(i+n/4), j->(j+n/4)))(b10)
-    println(b100)
-    */
-
+        s->s.translate(List(i,j), i->(i+n/4), j->(j+n/4)),        
+        t->t.translate(List(i,j), i->(i+n/4), j->(j+n/4)),
+        r->r.translate(List(i,j), i->(i+n/4), j->(j+n/4)))(b10)
+ 
+    // introduce C beforehand
+    // provide axioms to reason about reduce
+    val b000 = rewrite("b000", b,
+        n->n/2,
+        j->(j-n/4))(b00)
+    
     SMT.close()
   }
 }
