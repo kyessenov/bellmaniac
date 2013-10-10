@@ -120,8 +120,8 @@ object Var {
 }
 case class OpVar(v: Var, args: List[Var], exprs: List[Expr]) extends Funct {
   assert(v.arity > 0, "must be a function")
-  assert(v.arity == args.size && exprs.size == args.size, "wrong number of arguments in translation")
-  override def arity = v.arity
+  assert(v.arity == exprs.size, "wrong number of arguments in translation")
+  override def arity = args.size
 }
 case class App(v: Funct, args: List[Expr]) extends Expr {
   assert(v.arity == args.size, "wrong number of arguments in " + this)
@@ -712,9 +712,8 @@ object Parenthesis {
     IF 
       ((i === j - 1) -> x(j))
     ELSE 
-      Reduce(
-        (c(i, k) + c(k, j) where k in Range(i+1, j)) ++ 
-        (w(i, l, j) where l in Range(i+1, j))))
+      Reduce(c(i, k) + c(k, j) + w(i, k, j) 
+        where k in Range(i+1, j)))
     
   def main(args: Array[String]) {
     import Console.println
@@ -767,7 +766,9 @@ object Parenthesis {
         s->s.translate(List(i,j), i->(i+n/4), j->(j+n/4)),        
         t->t.translate(List(i,j), i->(i+n/4), j->(j+n/4)),
         r->r.translate(List(i,j), i->(i+n/4), j->(j+n/4)))(b10)
- 
+
+    
+
     // introduce C beforehand
     // provide axioms to reason about reduce
     val b000 = rewrite("b000", b,
