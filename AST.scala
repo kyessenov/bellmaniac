@@ -654,28 +654,23 @@ class Refinement {
       return false
     }
 
-    // check that inductive calls satisfy pred
-    visit(c.expr)(pred and c.pre, exprTransformer {        
-      case (path, a @ App(v, args)) if v == c.v =>
-        if (SMT.check(path and ! pred.s(c.args zip args))) {
-          msg("*** failed inductive step check")
-          return false
-        }
-        a
-    })
-
     // prove by induction on v (c's metric)
     // inductive step
     // ind is an uninterpreted version of c for the inductive step
     val ind = Var("_ind_" + c.v.name, c.v.arity)
-    val c_ind = transform(c.expr) {
-      case App(v, args) if v == c.v => 
-        // by induction hypothesis
-        App(d, args).flatten match {
-          // avoid recursion in the formula
-          case App(v, args) => assert(v == c.v); App(ind, args)
-        }                  
-    }
+    val c_ind = visit(c.expr)(pred and c.pre, exprTransformer {
+      case (path, App(v, args)) if v == c.v => 
+        if (SMT.check(path and ! pred.s(c.args zip args))) {
+          // violation of the inductive step predicate
+          App(ind, args)
+        } else {          
+          // by induction hypothesis
+          App(d, args).flatten match {
+            // avoid recursion in the formula
+            case App(v, args) => assert(v == c.v); App(ind, args)
+          }      
+        }
+    })
     val d_ind = transform(c.expr.s(c.args zip App(d, c.args).flatten.args)) {
       // avoid recursion in the formula
       case App(v, args) if v == c.v => App(ind, args)        
@@ -687,6 +682,7 @@ class Refinement {
     println(d_ind)
     
     if (SMT.check(pred and c.pre and !(c_ind === d_ind))) {
+      msg("*************************************")
       msg("*** failed to prove equation equality")
       return false
     }
@@ -741,7 +737,6 @@ class Refinement {
             App(nv, nvargs)
         }), Refine(OpVar(w, args1, args1 :+ (op match {
             case Some(op) => // todo: op
-              msg("full refstep: " + op)
               nv
             case None => nv
           }))))
