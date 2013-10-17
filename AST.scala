@@ -681,8 +681,10 @@ class Refinement {
       case App(v, args) if v == c.v => App(ind, args)        
     }
 
-    // println(c_ind)
-    // println(d_ind)
+    msg("c ind")
+    println(c_ind)
+    msg("d ind")
+    println(d_ind)
     
     if (SMT.check(pred and c.pre and !(c_ind === d_ind))) {
       msg("*** failed to prove equation equality")
@@ -791,18 +793,18 @@ object Parenthesis {
     val r = Var("r", 2)
     val s = Var("s", 2)
     val t = Var("t", 2)
-    val b = (unfold($, c0) andThen 
+    val b0 = (unfold($, c0) andThen 
       genZero($, r(i, j)) andThen 
       introduce($, r) andThen
       splitRange($, k, n/2) andThen
       specialize($, c0) andThen
       genApp($, c000.v, s) andThen 
       genApp($, c011.v, t) andThen
-      selfRefine("b"))(c001)
+      selfRefine("b0"))(c001)
     
-    val List(b1, b00, b01, b10, b11) = partition("b1", n < 8, i < n/4, j < n/2+n/4)(b)
+    val List(b1, b000, b001, b010, b011) = partition("b1", n < 8, i < n/4, j < n/2+n/4)(b0)
        
-    val b100 = rewrite("b100", b,
+    val b110 = rewrite("b110", b0,
         i->(i-n/4),
         j->(j-n/4),
         n->n/2,
@@ -810,15 +812,18 @@ object Parenthesis {
         x->x.translate(List(i), i->(i+n/4)),
         s->s.translate(List(i,j), i->(i+n/4), j->(j+n/4)),        
         t->t.translate(List(i,j), i->(i+n/4), j->(j+n/4)),
-        r->r.translate(List(i,j), i->(i+n/4), j->(j+n/4)))(b10)
-
+        r->r.translate(List(i,j), i->(i+n/4), j->(j+n/4)))(b010)
     
 
-    // introduce C beforehand
-    // provide axioms to reason about reduce
-    //val b000 = rewrite("b000", b,
-    //    n->n/2,
-    //    j->(j-n/4))(b00)
+    val b100 = rewrite("b100", b0,
+        i->i,
+        j->(j-n/4),
+        n->n/2,
+        w->w.translate(List(i,k,j), j->(j+n/4)),
+        x->x.translate(List(i)),
+        s->s.translate(List(i,j)),
+        t->t.translate(List(i,j)),
+        r->r)(b000)
 
     //GraphViz.display(steps)
     SMT.close()
