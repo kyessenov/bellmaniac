@@ -428,8 +428,8 @@ object Transform {
 }
 
 sealed trait Step
-case class RefStep(op: Funct) extends Step
-case object PartStep extends Step
+case class Refine(op: Funct) extends Step
+case object Specialize extends Step
 
 /**
  * Refinement steps
@@ -446,7 +446,7 @@ class Refinement {
          if k.v == from;
          (l, s) <- vs)
         s match {
-          case RefStep(op) =>
+          case Refine(op) =>
             if (l.v == to)
               return Some(op)
             else lift(l.v, to) match {
@@ -470,7 +470,7 @@ class Refinement {
     (x: Algorithm) => {
       val (out, stp) = f(x)
       steps.addBinding(x, (out, stp))
-      msg(x.v + " refined to ")
+      msg(x.v + " refined to " + out.v)
       println(out)    
       out
     }
@@ -490,38 +490,44 @@ class Refinement {
   }
 
   // Add parameters to a function 
-  def introduce(name: String, vs: Var*) = 
-    step {
-      case Algorithm(v, args, pre, e) => 
-        val w = Var(name, v.arity + vs.size)
-        val args1 = args.map(_.fresh)
-        (Algorithm(w, args ++ vs.toList, pre, e), 
-         RefStep(OpVar(w, args1, args1 ++ vs.toList)))        
-    }
+  def introduce(name: String, vs: Var*) = step {
+    case Algorithm(v, args, pre, e) => 
+      val w = Var(name, v.arity + vs.size)
+      val args1 = args.map(_.fresh)
+      (Algorithm(w, args ++ vs.toList, pre, e), 
+       Refine(OpVar(w, args1, args1 ++ vs.toList)))        
+  }
 
   // Push functions down refinement chain
   // todo: check termination
-  def pushDown(name: String) = 
-    step {
-      case Algorithm(v, args, pre, e) =>
-        val w = v.rename(name)        
-        def push(e: Expr): Expr = transform(e) {
-          case App(u: Var, uargs) if lift(u, v).isDefined =>
-            App(lift(u, v).get compose w, uargs.map(push(_))).flatten
-        }
-        (Algorithm(w, args, pre, push(e)), RefStep(w))
-    }
-  def pushDown(name: String, goal: Algorithm) = 
-    step {
-      case Algorithm(v, args, pre, e) =>
-        val w = v.rename(name)        
-        def push(e: Expr): Expr = transform(e) {
-          case App(u: Var, uargs) if lift(u, goal.v).isDefined =>
-            App(lift(u, goal.v).get, uargs.map(push(_))).flatten
-        }
-        (Algorithm(w, args, pre, push(e)), RefStep(w))
-    }
-  
+  def selfRefine(name: String) = step {
+    case Algorithm(v, args, pre, e) =>
+      val w = v.rename(name)        
+      def push(e: Expr): Expr = transform(e) {
+        case App(u: Var, uargs) if lift(u, v).isDefined =>
+          App(lift(u, v).get compose w, uargs.map(push(_))).flatten
+      }
+      (Algorithm(w, args, pre, push(e)), Refine(w))
+  }
+
+  // Specialize application of c0 to its immediate version
+  // TODO check termination
+  def specialize(name: String, c0: Algorithm) = step {
+    case Algorithm(v, args, pre, expr) =>
+      val w = v.rename(name)
+      def push(path: Pred, e: Expr): Expr = 
+        visit(e)(path, exprTransformer {
+          case (path, App(u, uargs)) if u == c0.v =>      
+            steps(c0).collect {
+              case (c1, Specialize) if
+                ! SMT.check(path and ! c1.pre.s(c1.args zip uargs)) => c1
+            } headOption match {
+              case Some(c1) => App(c1.v, uargs)
+              case None => App(c0.v, uargs)
+            }
+        }) 
+      (Algorithm(w, args, pre, push(pre, expr)), Refine(w))
+  }
 
   // Create specialized versions of alg by splitting the domain
   def partition(name: String, base: Pred, splits: Pred*): Algorithm => List[Algorithm] = {    
@@ -550,15 +556,14 @@ class Refinement {
       }
       explore()
 
+      msg(v + " refined to " + name)
       val alg = Algorithm(Var(name, v.arity), args, pre, out) 
 
       println(alg)
-      steps.addBinding(a, (alg, RefStep(alg.v)))    
-      for (alg <- algs) {
-        println(alg)
-        steps.addBinding(a, (alg, PartStep))
-      }
-
+      steps.addBinding(a, (alg, Refine(alg.v)))    
+      for (alg <- algs) 
+        steps.addBinding(a, (alg, Specialize))
+      
       alg :: algs.reverse
   }
 
@@ -576,7 +581,7 @@ class Refinement {
         visit(e)(pre, exprTransformer {
           case (path, App(w, args)) if w == c.v && proveEq(path, c, d) =>
             (App(d, args).flatten)
-        })), RefStep(w))
+        })), Refine(w))
   }
 
   // Complete OpVar of c based on op
@@ -687,17 +692,7 @@ class Refinement {
     return true
   }
 
-  // c1 is a refinement and/or restriction of c0
-  // TODO check for induction metric
-  def refine(name: String, c0: Algorithm, c1: Algorithm) = step {
-    case Algorithm(v, args, pre, expr) =>
-      val w = v.rename(name)
-      (Algorithm(w, args, pre, visit(expr)(pre, exprTransformer {
-        case (path, App(w, wargs)) if w == c0.v &&          
-          (! SMT.check(path and ! c1.pre.s(c1.args zip wargs))) =>
-          App(if (c1.v == v) Var(name, v.arity) else c1.v, wargs)
-      })), RefStep(w))
-  }
+
 
   // Unroll application to c
   def unfold(name: String, c: Algorithm) = step {
@@ -706,7 +701,7 @@ class Refinement {
       (Algorithm(w, args, pre, transform(expr) {
         case App(w, wargs) if w == c.v =>
           c.expr.s(c.args zip wargs)
-      }), RefStep(w))
+      }), Refine(w))
   }
         
   // Split "k in range(a,b) into k1 in range(a,e) and k2 in range(e,b)
@@ -719,14 +714,14 @@ class Refinement {
           val v2 = Var(v.name + "2")
           Join(Compr(substitute(e, Map(v->v1)), v1, Range(l, mid)), 
               Compr(substitute(e, Map(v->v2)), v2, Range(mid, h)))
-      }), RefStep(w))
+      }), Refine(w))
   }
   // Generalize zero
   def genZero(name: String, zero: Expr) = step { 
     case Algorithm(v, args, pre, expr)  =>
       val w = v.rename(name)
       (Algorithm(w, args, pre, transform(expr) { case Zero => zero }), 
-       RefStep(w)) 
+       Refine(w)) 
     }
 
   // Generalize variable application
@@ -742,7 +737,7 @@ class Refinement {
             val nvargs1 = nvargs.map(v => Var.fresh(arity = v.arity))
             op = Some(OpVar(ov, nvargs1, nvargs1 ++ uargs.drop(nv.arity)))
             App(nv, nvargs)
-        }), RefStep(OpVar(w, args1, args1 :+ (op match {
+        }), Refine(OpVar(w, args1, args1 :+ (op match {
             case Some(op) => // todo: op
               msg("full refstep: " + op)
               nv
@@ -778,7 +773,8 @@ object Parenthesis {
     import refinement._
 
     induction(C, j-i, 0)
-    val c0 = (introduce($, n, w, x) andThen pushDown("c0"))(C)    
+    val c0 = (introduce($, n, w, x) andThen 
+      selfRefine("c0"))(C)    
     val List(c1, c000, c001, c011) = partition("c1", n < 4, i < n/2, j < n/2)(c0) 
   
     val c100 = rewrite("c100", c0, n -> n/2)(c000) 
@@ -791,26 +787,20 @@ object Parenthesis {
     // to the symbolic unification
     println("UNIFICATION EQS:")
     unify(c0, i->(i-n/2), j->(j-n/2), n->n/2)
-      
+     
     val r = Var("r", 2)
-    val b0 = (unfold($, c0) andThen 
-      genZero($, r(i, j)) andThen 
-      introduce("b0", r))(c001)   
-    val b1 = splitRange("b1", k, n/2)(b0)
-    // merge with pushDown command
-    val b2 = refine("b2", c0, c100)(b1)
-    val b3 = refine("b3", c0, c111)(b2)    
-    val b4 = refine("b4", c0, c001)(b3)
-    
     val s = Var("s", 2)
     val t = Var("t", 2)
-    val b5 = (genApp($, c100.v, s) andThen 
-      genApp("b5", c111.v, t))(b4)
+    val b = (unfold($, c0) andThen 
+      genZero($, r(i, j)) andThen 
+      introduce($, r) andThen
+      splitRange($, k, n/2) andThen
+      specialize($, c0) andThen
+      genApp($, c000.v, s) andThen 
+      genApp($, c011.v, t) andThen
+      selfRefine("b"))(c001)
     
-    // todo: re-apply c0 -> b to recursive applications
-    val b = pushDown("b")(b5)
-    
-    val List(b6, b00, b01, b10, b11) = partition("b6", n < 8, i < n/4, j < n/2+n/4)(b)
+    val List(b1, b00, b01, b10, b11) = partition("b1", n < 8, i < n/4, j < n/2+n/4)(b)
        
     val b100 = rewrite("b100", b,
         i->(i-n/4),
@@ -830,7 +820,7 @@ object Parenthesis {
     //    n->n/2,
     //    j->(j-n/4))(b00)
 
-    GraphViz.display(steps)
+    //GraphViz.display(steps)
     SMT.close()
   }
 }
