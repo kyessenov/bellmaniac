@@ -854,12 +854,23 @@ object Parenthesis {
 
   val c = Var("c", 2)
   val w = Var("w", 3)
- 
-  // removed x because can't embed values of x into r yet
-  val Par = Algorithm(c, i :: j :: Nil, 
+  val r = Var("r", 2)
+  val x = Var("x", 1)
+  
+  val par = Algorithm(c, i :: j :: Nil,
+    0 <= i and i < n and i < j and j < n,
+    IF ((i === j-1) -> x(i)) 
+    ELSE
+      Reduce(c(i, k) + c(k, j) + w(i, k, j) 
+      where k in Range(i+1, j)))
+
+  // TODO missing step from par to par0
+  // r(i, i-1) = x(i)
+
+  val par0 = Algorithm(c, i :: j :: Nil, 
     0 <= i and i < n and i < j and j < n, 
     Reduce(c(i, k) + c(k, j) + w(i, k, j) 
-      where k in Range(i+1, j)))
+      where k in Range(i+1, j), r(i, j)))
     
   def main(args: Array[String]) {
     import Console.println
@@ -872,30 +883,22 @@ object Parenthesis {
     import proof._
     STRICT = true
 
-    induction(Par, j-i, 0)
-    val c0 = (introduce($, n, w) andThen 
-      selfRefine("c0"))(Par)    
+    induction(par0, j-i, 0)
+    val c0 = (introduce($, n, w, r) andThen 
+      selfRefine("c0"))(par0)    
     val List(c1, c000, c001, c011) = partition("c1", n < 4, i < n/2, j < n/2)(c0) 
   
     val c100 = rewrite("c100", c0)(n -> n/2)(c000) 
     // use free assumption n mod 2 = 0    
     val c111 = rewrite("c111", c0)(i -> (i-n/2), j -> (j-n/2), n -> n/2, 
-      w -> w.translate(List(i, j, k), i->(i+n/2), j->(j+n/2), k->(k+n/2)))(c011)
-    // TODO:
-    // inferring offsets in i and j requires using the precondition in addition
-    // to the symbolic unification
-    //println("UNIFICATION EQS:")
-    //unify(c0, i->(i-n/2), j->(j-n/2), n->n/2)
-     
+      w->(w>>(n/2, n/2, n/2)), 
+      r->(r>>(n/2,n/2)))(c011)
 
     // We have to make a very general version of b0 to make proofs work
-    val r = Var("r", 2)
     val s = Var("s", 2)
     val t = Var("t", 2)
     val w1 = Var("w1", 3)
-    val b0 = (unfold($, c0) andThen 
-      genZero($, r(i, j)) andThen 
-      introduce($, r) andThen
+    val b0 = (unfold($, c0) andThen
       splitRange($, k, n/2) andThen
       specialize($, c0) andThen
       genApp($, c000.v, s) andThen 
@@ -995,7 +998,7 @@ object Parenthesis {
 
 
     println(COUNTER + " refinements")
-    GraphViz.display(steps)
+    //GraphViz.display(steps)
     SMT.close()
   }
 }
