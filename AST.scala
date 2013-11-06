@@ -6,7 +6,10 @@ case class Algorithm(v: Var, args: List[Var], pre: Pred, expr: Expr) {
   override def toString = Python.print(this)
   def lift(that: Algorithm)(rest: Expr*) =
     OpVar(that.v, args, args ++ rest.toList)
+  def translate(op: (Var, Expr)*) = 
+    v.translate(args, op: _*)
 }
+
 
 // Boolean predicate
 sealed trait Pred extends Term {
@@ -102,7 +105,10 @@ sealed trait Funct extends Expr {
   def >>(offset: Expr*) = {
     assert (offset.size == arity)
     val args = (1 to arity).map(_ => Var.fresh()).toList
-    OpVar(Var.fresh(">>", arity), args, (args zip offset.toList).map { case (v, off) => v + off }) compose this
+    OpVar(Var.fresh(">>", arity), args, (args zip offset.toList).map {
+        case (v, off) if off == Const(0) => v
+        case (v, off) => v + off 
+    }) compose this
   }
 }
 case class Var(name: String, override val arity: Int = 0) extends Funct {
@@ -271,7 +277,8 @@ object SMT {
       val v = Var.fresh()
       side += "(declare-const " + v.name + " Int)"
       print(v)
-    case Reduce(r, init) => "(reduce " + print(r) + " " + print(init) + ")"
+    case Reduce(r, init) => // "(reduce " + print(r) + " " + print(init) + ")"
+      "(+ " + print(r) + " " + print(init) + ")"
     case a: App => a.flatten match {
       case App(Var(n, k), args) => "(" + n + " " + args.map(print(_)).mkString(" ") + ")"
       case _ => ???
@@ -282,10 +289,12 @@ object SMT {
     }
   }
   def print(s: Seq)(implicit side: ListBuffer[String]): String = s match {
-    case Singleton(e) => "(singleton " + print(e) + ")"
-    case Join(l, r) => "(join " + print(l) + " " + print(r) + ")"
+    case Singleton(e) => //"(singleton " + print(e) + ")"
+      print(e)
+    case Join(l, r) => // "(join " + print(l) + " " + print(r) + ")"
+      "(+ " + print(l) + " " + print(r) + ")"
     case Compr(e, v, Range(l, h)) => "(compr " + 
-      print(e.s(List(v->(v+l)))) + " " + print(h-l) + ")"
+      print(e.s(List(v->(Var("iter")+l)))) + " " + print(h-l) + ")"
   }
   def print(p: Pred)(implicit side: ListBuffer[String]): String = p match {
     case True => "true"
@@ -335,12 +344,13 @@ object SMT {
 
   def open() {
     z3 = new Z3
-    z3.command("(declare-sort Seq)")
+    //z3.command("(declare-sort Seq)")
     z3.command("(declare-fun zero () Int)")
-    z3.command("(declare-fun reduce (Seq Int) Int)")
-    z3.command("(declare-fun join (Seq Seq) Seq)")
-    z3.command("(declare-fun compr (Int Int) Seq)")
-    z3.command("(declare-fun singleton (Int) Seq)")
+    z3.command("(declare-fun iter () Int)")
+    //z3.command("(declare-fun reduce (Seq Int) Int)")
+    //z3.command("(declare-fun join (Seq Seq) Seq)")
+    z3.command("(declare-fun compr (Int Int) Int)")
+    //z3.command("(declare-fun singleton (Int) Seq)")
   }
 
   def close() {
@@ -628,17 +638,20 @@ class Proof {
 
   // Rewrite calls to c as d = OpVar(c,...) provided substitution
   // is correct under path condition
-  def rewrite(name: String, ov: Algorithm, hint: Refinement = id)(ve: (Var, Expr)*) =
-    rewrite0(name, ov, ov, ov.v, hint)(ve: _*)
+  def rewrite(name: String, ov: Algorithm, 
+    hint1: Refinement = id, hint2: Refinement = id)(ve: (Var, Expr)*) =
+    rewrite0(name, ov, ov, ov.v, hint1, hint2)(ve: _*)
 
-  def rewrite0(name: String, ov: Algorithm, nv: Algorithm, lift: Funct, hint: Refinement = id)(ve: (Var, Expr)*) = {
+  def rewrite0(name: String, ov: Algorithm, nv: Algorithm, lift: Funct, 
+    hint1: Refinement = id, hint2: Refinement = id)(ve: (Var, Expr)*) = {
     val op = lift compose nv.v.translate(nv.args, ve: _*)
     step {
       case Algorithm(v, args, pre, e) =>
         val w = v.rename(name)
         (Algorithm(w, args, pre, 
           visit(e)(pre, exprTransformer {
-            case (path, App(w, args)) if w == ov.v && proveEq(path, ov, nv, op, hint) =>
+            case (path, App(w, args)) if w == ov.v && 
+              proveEq(path, ov, nv, op, hint1, hint2) =>
               (App(op, args).flatten)
           })), Refine(w))
     }
@@ -706,7 +719,8 @@ class Proof {
   var SKIP_FIRST = false
     
   // Prove by induction that pred(v) => c(v) = c(f(v)) where d = OpVar(c, f)
-  def proveEq(pred: Pred, ov: Algorithm, nv: Algorithm, op: Funct, hint: Refinement): Boolean = {
+  def proveEq(pred: Pred, ov: Algorithm, nv: Algorithm, op: Funct, 
+    hint1: Refinement, hint2: Refinement): Boolean = {
     assert (nv.v == op.v)
     // check domains: d is well defined for substitution
     val domain = pred and ov.pre and ! nv.pre.s(nv.args zip App(op, ov.args).flatten.args)
@@ -716,7 +730,7 @@ class Proof {
     }
 
     // apply proof hint and get expression
-    val oexpr = flatten(hint(Algorithm(ov.v, ov.args, pred and ov.pre, ov.expr)).expr)
+    val oexpr = flatten(hint1(Algorithm(ov.v, ov.args, pred and ov.pre, ov.expr)).expr)
 
     // prove by induction on v (c's metric)
     // inductive step
@@ -737,7 +751,8 @@ class Proof {
           }
         }
     }))
-    val nind = flatten(nv.expr.s(nv.args zip App(op, ov.args).flatten.args))
+    val nind = flatten(hint2(Algorithm(nv.v, nv.args, nv.pre, 
+      nv.expr.s(nv.args zip App(op, ov.args).flatten.args))).expr)
   
     if (SMT.check(pred and ov.pre and !(oind === nind))) {
       msg("pred")
@@ -759,7 +774,7 @@ class Proof {
   def unfold(name: String, c: Algorithm) = step {
     case Algorithm(v, args, pre, expr) =>
       val w = v.rename(name)
-      (Algorithm(w, args, pre, transform(expr) {
+      (Algorithm(w, args, pre, transform(flatten(expr)) {
         case App(w, wargs) if w == c.v =>
           c.expr.s(c.args zip wargs)
       }), Refine(w))
@@ -877,6 +892,7 @@ object Parenthesis {
     val r = Var("r", 2)
     val s = Var("s", 2)
     val t = Var("t", 2)
+    val w1 = Var("w1", 3)
     val b0 = (unfold($, c0) andThen 
       genZero($, r(i, j)) andThen 
       introduce($, r) andThen
@@ -884,6 +900,7 @@ object Parenthesis {
       specialize($, c0) andThen
       genApp($, c000.v, s) andThen 
       genApp($, c011.v, t) andThen
+      genApp($, w, w1) andThen
       selfRefine("b0"))(c001)
    
     val List(b1, b000, b001, b010, b011) = partition("b1", n < 8, i < n/4, j < n/2+n/4)(b0)
@@ -892,24 +909,93 @@ object Parenthesis {
         i->(i-n/4),
         j->(j-n/4),
         n->n/2,
-        w->w.translate(List(i,j,k), i->(i+n/4),j->(j+n/4),k->(k+n/4)),
-        s->s.translate(List(i,j), i->(i+n/4), j->(j+n/4)),        
-        t->t.translate(List(i,j), i->(i+n/4), j->(j+n/4)),
-        r->r.translate(List(i,j), i->(i+n/4), j->(j+n/4)))(b010)
+        w->(w>>(n/4,n/4,n/4)),
+        w1->(w1>>(n/4,n/4,n/4)),
+        s->(s>>(n/4,n/4)),       
+        t->(t>>(n/4,n/4)),
+        r->(r>>(n/4,n/4))
+      )(b010)
+
+    // define d
+    val d = Var("d", 7)
+    val D = Algorithm(d, List(i, j, n, w, r, s, t),
+      0 <= i and i < n/2 and 0 <= j and j < n/2,
+      Reduce(s(i, k) + t(k, j) + w(i, k, j) where k in Range(0, n/2), r(i, j)))
+    println(D)
      
+    val i0 = Var("i0")
+    val j0 = Var("j0")
+    val i1 = Var("i1")
+    val j1 = Var("j1")
+    val i2 = Var("i2")
+    val j2 = Var("j2")
+    val bx = OpVar(b0.v, List(i1, j1), List(i1, j1, n, w, r, s, t, w1))
     // we can infer i and j displacements by looking at pre-condition of b0 and case of b000   
-    val b100 = rewrite("b100", b0, splitRange($, Var("k1"), n/4))(
+    val b100 = rewrite("b100", b0, splitRange($, Var("k1"), n/4), unfold($, D))(
         i->i,
         j->(j-n/4),
+        n->n/2,        
+        w->(w>>(0,n/4,n/4)),
+        w1->(w1>>(0,0,n/4)),        
+        t->(t>>(n/4,n/4)),
+        r->OpVar(d, List(i0, j0), List(i0, j0-n/4, n/2, w1>>(0,n/4,n/2), 
+          r>>(0,n/2),s>>(0,n/4),bx>>(n/4,n/2)))          
+      )(b000)
+    val b111 = rewrite("b111", b0, splitRange($, Var("k2"), n/4+n/2), unfold($, D))(
+        i->(i-n/4),
+        j->(j-n/2),
+        s->(s>>(n/4,n/4)),
+        t->(t>>(n/2,n/2)),
+        w->(w>>(n/4,n/2,n/2)),
+        w1->(w1>>(n/4,n/4,n/2)),
         n->n/2,
-        w->w.translate(List(i,j,k), j->(j+n/4), k->(k+n/4)),      
+        r->OpVar(d, List(i0, j0), List(i0+n/4, j0+n/2, n/2, w>>(0,n/2,0),
+          r, bx>>(0,n/2), t>>(n/2,0)))
+      )(b011)
+    val b101 = rewrite("b101", b0, 
+        splitRange($, Var("k1"), n/4) andThen splitRange($, Var("k2"), n/4+n/2),
+        unfold($, D) andThen unfold($, D))(
+        j->(j-n/2),
+        n->n/2,
         s->s,
-        t->t.translate(List(i,j), i->(i+n/4), j->(j+n/4)),
-        r->r.translate(List(i,j), j->(j+n/4)))(b000)
-      
+        w1->(w1>>(0,0,n/2)),
+        t->(t>>(n/2,n/2)),
+        w->(w>>(0,n/2,n/2)),
+        r->OpVar(d, List(i0, j0), List(i0, j0+n/2, n/2, w1>>(0,n/4,0),
+          OpVar(d, List(i2, j2), List(i2, j2, n/2, w>>(0,n/2,0), r, bx>>(0,n/2), t>>(n/2,0))), 
+          s>>(0,n/4), bx>>(n/4,0)))        
+      )(b001)
+
+    val List(d1, d00, d01, d10, d11) = partition("d1", n < 4, i < n/4, j < n/4)(D)
+    val d100 = rewrite("d100", D, splitRange($, k, n/4), unfold($, D))(
+      n->n/2, r->OpVar(d, List(i0, j0), List(i0,j0,n/2, 
+        w>>(0,n/4,0),r,s>>(0,n/4),t>>(n/4,0)))
+    )(d00)
+    val d110 = rewrite("d110", D, splitRange($, k, n/4), unfold($, D))(
+      i->(i-n/4), n->n/2, 
+      r->OpVar(d, List(i0, j0), List(i0, j0, n/2, w>>(n/4,0,0), r>>(n/4,0), s>>(n/4,0), t)),
+      w->(w>>(n/4,n/4,0)),
+      s->(s>>(n/4,n/4)),
+      t->(t>>(n/4,0))
+    )(d10)
+    val d101 = rewrite("d101", D, splitRange($, k, n/4), unfold($, D))(
+      j->(j-n/4), n->n/2,
+      r->OpVar(d, List(i0, j0), List(i0, j0, n/2, w>>(0,0,n/4), r>>(0,n/4), s, t>>(0, n/4))),
+      w->(w>>(0,n/4,n/4)),
+      s->(s>>(0,n/4)),
+      t->(t>>(n/4,n/4))
+    )(d01)
+    val d111 = rewrite("d111", D, splitRange($, k, n/4), unfold($, D))(
+      i->(i-n/4), j->(j-n/4), n->n/2,
+      r->OpVar(d, List(i0, j0), List(i0, j0, n/2, w>>(n/4,0,n/4), r>>(n/4,n/4), s>>(n/4,0), t>>(0,n/4))),
+      w->(w>>(n/4,n/4,n/4)),
+      s->(s>>(n/4,n/4)),
+      t->(t>>(n/4,n/4))
+    )(d11)
+
 
     println(COUNTER + " refinements")
-    //GraphViz.display(steps)
+    GraphViz.display(steps)
     SMT.close()
   }
 }
