@@ -797,13 +797,6 @@ class Proof {
           }
       })), Refine(w))
   }
-  // Generalize zero
-  def genZero(name: String, zero: Expr) = step { 
-    case Algorithm(v, args, pre, expr) =>
-      val w = v.rename(name)
-      (Algorithm(w, args, pre, transform(expr) { case Zero => zero }), 
-       Refine(w)) 
-    }
 
   def guard(name: String, pred: Pred) = step {
     case Algorithm(v, args, pre, expr) =>
