@@ -2,6 +2,11 @@ private object UnsatException extends RuntimeException("inconsistent model")
 
 case class SolverException(msg: String) extends RuntimeException(msg)
 
+sealed trait Result
+case object Unsat extends Result
+case object Sat extends Result
+case object Unknown extends Result
+
 /** SMT-LIB2 compliant solver. */
 trait Solver {
   /** Issue a command and expect success. */
@@ -13,13 +18,15 @@ trait Solver {
       throw SolverException("unexpected reply: " + reply)
   }
   /** Check satisfiability. */
-  def check(): Boolean = {
+  def check(): Result = {
     >("(check-sat)"); 
     val reply = <();
-    if (reply == "sat") 
-      true
+    if (reply == "sat")       
+      Sat
     else if (reply == "unsat")
-      false
+      Unsat
+    else if (reply == "unknown")
+      Unknown
     else 
       throw SolverException("unexpected reply: " + reply)
   }

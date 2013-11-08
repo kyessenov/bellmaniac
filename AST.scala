@@ -21,6 +21,7 @@ sealed trait Pred extends Term {
     case False => this
     case _ => Or(this, that)
   }
+  def implies(that: Pred): Pred = (! this) or that
   def unary_! = Not(this)  
   override def toString = Python.print(this)
   def s(subs: List[(Var, Expr)]) = 
@@ -261,8 +262,7 @@ object SMT {
   def print(e: Expr)(implicit side: ListBuffer[String]): String = e match {
     case Var(n, k) if k == 0 => n
     // apply to variable witnesses
-    case v @ Var(n, k) if k > 0 => print(App(v, (1 to k).map(i => Var(n + "_v_" + i)).toList))
-    case o @ OpVar(Var(n, k), _, _) => print(App(o, (1 to o.arity).map(i => Var(n + "_v_" + i)).toList))
+    case v: Funct  => print(App(v, (1 to v.arity).map(i => witness(i-1)).toList))
     case Const(i) => i.toString
     case Plus(l, r) => "(+ " + print(l) + " " + print(r) + ")"
     case Minus(l, r) => "(- " + print(l) + " " + print(r) + ")"
@@ -294,7 +294,7 @@ object SMT {
     case Join(l, r) => // "(join " + print(l) + " " + print(r) + ")"
       "(+ " + print(l) + " " + print(r) + ")"
     case Compr(e, v, Range(l, h)) => "(compr " + 
-      print(e.s(List(v->(Var("iter")+l)))) + " " + print(h-l) + ")"
+      print(e.s(List(v->(iterator+l)))) + " " + print(h-l) + ")"
   }
   def print(p: Pred)(implicit side: ListBuffer[String]): String = p match {
     case True => "true"
@@ -309,18 +309,23 @@ object SMT {
     case GE(l, r) => "(>= " + print(l) + " " + print(r) + ")"
   }
 
-  // Check for satisfaction
-  def check(p: Pred) = {
+  // Special variables
+  val iterator = Var("_i")
+  val witness = (1 to 16).map(i => Var("_w" + i)).toList
+
+  // Try to prove the negative
+  def check(p: Pred) = ! prove(! p)
+
+  // Prove the predicate by checking for counter example.
+  // Returns true if the solver says "unsat", false if "sat" or "unknown"
+  def prove(p: Pred) = {
     val side = new ListBuffer[String]
     for (v <- Vars(p)) {
       side += "(declare-fun " + v.name + 
         " (" + (1 to v.arity).map(_ => "Int").mkString(" ")+ ") Int)";
-      // equality witnesses
-      for (i <- 1 to v.arity)
-        side += "(declare-fun " + v.name + "_v_" + i + " () Int)";
     }
-
-    val formula = print(p)(side)
+    
+    val formula = print(! p)(side)
 
     z3.push()
     for (s <- side)
@@ -339,14 +344,18 @@ object SMT {
 
     z3.pop()
 
-    out
+    out == Unsat
   }
 
   def open() {
     z3 = new Z3
     //z3.command("(declare-sort Seq)")
     z3.command("(declare-fun zero () Int)")
-    z3.command("(declare-fun iter () Int)")
+    // iterator
+    z3.command("(declare-fun " + iterator.name + " () Int)")
+    // equality witnesses
+    for (w <- witness) 
+      z3.command("(declare-fun " + w.name + " () Int)")    
     //z3.command("(declare-fun reduce (Seq Int) Int)")
     //z3.command("(declare-fun join (Seq Seq) Seq)")
     z3.command("(declare-fun compr (Int Int) Int)")
@@ -537,14 +546,14 @@ class Proof {
   def induction(a: Algorithm, metric: Expr, base: Expr) {
     visit(a.expr)(a.pre, exprTransformer {
       case (path, app @ App(v, args)) if v == a.v =>
-        if (SMT.check(path and metric.s(a.args zip args) >= metric)) {
-          msg("failed induction check on " + a.v + " at " + app) 
+        if (! SMT.prove(path implies (metric.s(a.args zip args) < metric))) {
+          error("failed induction check on " + a.v + " at " + app) 
         }
         app
     })
     
-    if (SMT.check(a.pre and metric <= base))
-      msg("failed base case check")
+    if (! SMT.prove(a.pre implies (base <= metric)))
+      error("failed base case check")
   }
 
   // Add parameters to a function 
@@ -587,8 +596,7 @@ class Proof {
         visit(e)(path, exprTransformer {
           case (path, App(u, uargs)) if u == c0.v =>      
             steps(c0).collect {
-              case (c1, Specialize) if
-                ! SMT.check(path and ! c1.pre.s(c1.args zip uargs)) => c1
+              case (c1, Specialize) if SMT.prove(path implies c1.pre.s(c1.args zip uargs)) => c1
             } headOption match {
               case Some(c1) => App(c1.v, uargs)
               case None => App(c0.v, uargs)
@@ -723,8 +731,8 @@ class Proof {
     hint1: Refinement, hint2: Refinement): Boolean = {
     assert (nv.v == op.v)
     // check domains: d is well defined for substitution
-    val domain = pred and ov.pre and ! nv.pre.s(nv.args zip App(op, ov.args).flatten.args)
-    if (SMT.check(domain)) {
+    val domain = (pred and ov.pre) implies nv.pre.s(nv.args zip App(op, ov.args).flatten.args)
+    if (! SMT.prove(domain)) {
       error("failed domain check")
       return false
     }
@@ -754,7 +762,7 @@ class Proof {
     val nind = flatten(hint2(Algorithm(nv.v, nv.args, nv.pre, 
       nv.expr.s(nv.args zip App(op, ov.args).flatten.args))).expr)
   
-    if (SMT.check(pred and ov.pre and !(oind === nind))) {
+    if (! SMT.prove((pred and ov.pre) implies (oind === nind))) {
       msg("pred")
       println(pred)
       msg("oind")
@@ -786,7 +794,7 @@ class Proof {
       val w = v.rename(name)
       (Algorithm(w, args, pre, visit(expr)(pre, seqTransformer {
         case (path, compr @ Compr(e, v, Range(l, h))) if v == k => 
-          if (SMT.check(path and ! (l <= mid and mid <= h))) {
+          if (! SMT.prove(path implies (l <= mid and mid <= h))) {
             error("can't split range")
             compr
           } else {
@@ -807,11 +815,13 @@ class Proof {
   def relax(name: String, pred: Pred) = step {
     case a @ Algorithm(v, args, pre, expr) =>
       val w = v.rename(name)
-      val pre1 = if (SMT.check(pre and !pred)) {
-        error("cannot relax precondition " + pre + " to " + pred)
-        pre
-      } else
-        pred
+      val pre1 = 
+        if (! SMT.prove(pre implies pred)) {
+          error("cannot relax precondition " + pre + " to " + pred)
+          pre
+        } else {
+          pred
+        }
       (Algorithm(w, args, pre1, expr), Relax)
   }
 
@@ -876,7 +886,7 @@ object Parenthesis {
     import proof._
     STRICT = true
 
-    induction(par0, j-i, 0)
+    induction(par, j-i, 1)
     val c0 = (introduce($, n, w, r) andThen 
       selfRefine("c0"))(par0)    
     val List(c1, c000, c001, c011) = partition("c1", n < 4, i < n/2, j < n/2)(c0) 
@@ -1048,6 +1058,7 @@ object Floyd {
     import proof._
     STRICT = true
 
+    induction(F, k, 0)
     val a = (introduce($, n, r) andThen selfRefine("a"))(F)
     val List(a1, a000, a001, a010, a011, a100, a101, a110, a111) = partition("a1", n < 2,
         i < n/2, j < n/2, k <= n/2)(a)
