@@ -198,6 +198,7 @@ object Vars {
 object Python {
   val prelude = 
 """
+#!/usr/bin/python
 class memoize(dict):
   def __init__(self, func):
     self.func = func
@@ -208,6 +209,10 @@ class memoize(dict):
     return result
 plus = min
 zero = 10000000000000000000000000000
+
+import random
+import sys
+sys.setrecursionlimit(2 ** 16)
 """
   // translate into python list/generator
   def print(s: Seq): String = s match {
@@ -231,9 +236,12 @@ zero = 10000000000000000000000000000
     case Havoc => "None"
     case OpVar(v, args, exprs) => "(lambda " + args.map(print(_)).mkString(", ") + 
       ": " + print(v) + "(" + exprs.map(print(_)).mkString(", ") + ")"
-    case Cond(cases, default) => "  if " + cases.map { case (pred, expr) =>
-      print(pred) + ":\n    return " + print(expr).lines.mkString("\n   ")
-    }.mkString("\n  elif ") + "\n  else:\n    return " + print(default).lines.mkString("\n  ")          
+
+    case Cond(cases, default) => cases match {
+      case (pred, expr) :: rest => "(" + print(expr) + " if " + print(pred) + " else " + 
+        print(Cond(rest, default)) + ")"
+      case Nil => print(default)
+    }  
   }
   def print(p: Pred): String = p match {
     case True => "True"
@@ -252,7 +260,9 @@ zero = 10000000000000000000000000000
     "(" + a.args.map(print(_)).mkString(", ") + "):\n" +     
     "  assert " + print(a.pre) + 
     "\n" + { a.expr match {
-      case e: Cond => print(e)
+      case Cond(cases, default) => "  if " + cases.map { case (pred, expr) => 
+        print(pred) + ":\n    " + print(expr) }.mkString("\n  elif ") + 
+        "\n  else:\n    " + print(default)        
       case e => "  return " + print(e)
     }}
   }
@@ -381,6 +391,7 @@ object SMT {
  
     // iterator
     z3.command("(declare-fun " + iterator.name + " () Int)")
+    
     // equality witnesses
     for (w <- witness) 
       z3.command("(declare-fun " + w.name + " () Int)")    
@@ -503,17 +514,46 @@ object Transform {
     
 }
 
-sealed trait Step
-case class Refine(op: Funct) extends Step
-case object Specialize extends Step
-case object Relax extends Step 
+trait Environment extends Logger {
+  // input tables
+  var inputs: List[Var] = List()
+  // algorithms
+  var algorithms: List[Algorithm] = List()
+
+  def addInput(v: Var) {
+    inputs = v :: inputs
+  }
+
+  def addAlg(alg: Algorithm) =
+    if (algorithms.contains(alg)) 
+      error("adding duplicate algorithm: " + alg)
+    else
+      algorithms = alg :: algorithms
+
+  import java.io.PrintStream
+  def pythonize(out: PrintStream = Console.out) {
+    out.println(Python.prelude)
+    import Python.{print => txt}
+    for (input <- inputs) {
+      out.println("@memoize\ndef " + txt(input) + "(" + 
+        (1 to input.arity).map("v"+_).mkString(", ") + "):")
+      out.println("  return random.randint(0, 1000)")
+    }
+    for (alg <- algorithms)
+      out.println(alg)
+  }
+}
+
 
 /**
  * Refinement steps
  */
-class Proof {
-  // throw on error
-  var STRICT = false
+class Proof extends Environment {
+  sealed trait Step
+  case class Refine(op: Funct) extends Step
+  case object Specialize extends Step
+  case object Relax extends Step 
+
   // keep all versions of algorithms
   import collection.mutable.{ HashMap, MultiMap, Set }
   import Transform._
@@ -521,6 +561,7 @@ class Proof {
     with MultiMap[Algorithm, (Algorithm, Step)]
   var COUNTER = 0
 
+  // attempt to follow down refinement chain
   def lift(from: Var, to: Var): Option[Funct] = {
     for ((k, vs) <- steps
          if k.v == from;
@@ -539,29 +580,13 @@ class Proof {
     return None
   }
 
-  private def msg(s: => String) = {
-    print(Console.RED)
-    println(s)
-    print(Console.RESET)
-  }
-
-  private def error(s: => String) = {
-    if (STRICT)
-      throw new RuntimeException(s)
-    msg("***************************************************************************")
-    msg(s)
-  }
-
-  type Refinement = Algorithm => Algorithm
-
-  def id: Refinement = identity[Algorithm]
-
   def step(f: Algorithm => (Algorithm, Step)): Refinement = {
     case x: Algorithm => 
       val (out, stp) = f(x)
       steps.addBinding(x, (out, stp))
-      msg(x.v + " refined to " + out.v)
-      println(out)    
+      message(x.v + " refined to " + out.v)
+      addAlg(out)
+      //println(out)    
       COUNTER = COUNTER + 1
       out
   }
@@ -579,6 +604,15 @@ class Proof {
     if (! SMT.prove(a.pre implies (base <= metric)))
       error("failed base case check")
   }
+  
+  def $ = Var.fresh().name
+
+  // Refinement steps
+
+  type Refinement = Algorithm => Algorithm
+
+  // Identity
+  def id: Refinement = identity[Algorithm]
 
   // Substitute the body of an algorithm
   def manual(name: String, body: Expr, hint: Refinement = id) = step {
@@ -602,7 +636,7 @@ class Proof {
   }
 
   // Push self-application down the refinement chain
-  // todo: check termination
+  // todo check termination
   def selfRefine(name: String) = step {
     case Algorithm(v, args, pre, e) =>
       val w = v.rename(name)        
@@ -669,10 +703,8 @@ class Proof {
       }
       explore()
 
-      msg(v + " refined to " + name)
+      message(v + " refined to " + name)
       val alg = Algorithm(Var(name, v.arity), args, pre, out) 
-
-      println(alg)
       steps.addBinding(a, (alg, Refine(alg.v)))    
       for (alg <- algs) 
         steps.addBinding(a, (alg, Specialize))
@@ -702,6 +734,134 @@ class Proof {
     }
   }
 
+
+  var SKIP_FIRST = false
+    
+  // Prove by induction that pred(v) => c(v) = c(f(v)) where d = OpVar(c, f)
+  def proveEq(pred: Pred, ov: Algorithm, nv: Algorithm, op: Funct, 
+    hint1: Refinement, hint2: Refinement): Boolean = {
+    assert (nv.v == op.v)
+    // check domains: d is well defined for substitution
+    val domain = (pred and ov.pre) implies nv.pre.s(nv.args zip App(op, ov.args).flatten.args)
+    if (! SMT.prove(domain)) {
+      error("failed domain check")
+      return false
+    }
+
+    // apply proof hint and get expression
+    val oexpr = flatten(hint1(Algorithm(ov.v, ov.args, pred and ov.pre, ov.expr)).expr)
+
+    // prove by induction on v (c's metric)
+    // inductive step
+    var skip = SKIP_FIRST
+    val oind = flatten(visit(oexpr)(pred and ov.pre, exprTransformer {
+      case (path, app @ App(v, args)) if v == ov.v => 
+        if (SMT.check(path and ! pred.s(ov.args zip args))) {
+          // violation of the inductive step predicate
+          app
+        } else {          
+          if (skip) {
+            // force skip for base case
+            skip = false
+            app
+          } else {
+            // by induction hypothesis
+            App(op, args)
+          }
+        }
+    }))
+    val nind = flatten(hint2(Algorithm(nv.v, nv.args, nv.pre, 
+      nv.expr.s(nv.args zip App(op, ov.args).flatten.args))).expr)
+  
+    if (! SMT.prove((pred and ov.pre) implies (oind === nind))) {
+      message("pred")
+      println(pred)
+      message("oind")
+      println(oind)
+      message("nind")
+      println(nind)
+      error("failed to prove equation equality")
+      return false
+    }
+   
+    return true
+  }
+
+  // Unroll application to c
+  def unfold(name: String, c: Algorithm) = step {
+    case Algorithm(v, args, pre, expr) =>
+      val w = v.rename(name)
+      (Algorithm(w, args, pre, transform(flatten(expr)) {
+        case App(w, wargs) if w == c.v =>
+          c.expr.s(c.args zip wargs)
+      }), Refine(w))
+  }
+        
+  // Split "k in range(a,b)" into "k1 in range(a,e) and k2 in range(e,b)"
+  def splitRange(name: String, k: Var, mid: Expr) = step {
+    case Algorithm(v, args, pre, expr) =>
+      val w = v.rename(name)
+      (Algorithm(w, args, pre, visit(expr)(pre, seqTransformer {
+        case (path, compr @ Compr(e, v, Range(l, h))) if v == k => 
+          if (! SMT.prove(path implies (l <= mid and mid <= h))) {
+            error("can't split range since value may lay outside of range")
+            compr
+          } else {
+            val v1 = Var(v.name + "1")
+            val v2 = Var(v.name + "2")
+            Join(Compr(substitute(e, Map(v->v1)), v1, Range(l, mid)), 
+                Compr(substitute(e, Map(v->v2)), v2, Range(mid, h)))
+          }
+      })), Refine(w))
+  }
+
+  // Fix a value for which old function symbol is used
+  def guard(name: String, pred: Pred) = step {
+    case Algorithm(v, args, pre, expr) =>
+      val w = v.rename(name)
+      (Algorithm(w, args, pre, IF (pred -> v(args:_*)) ELSE expr), Refine(w))
+  }
+
+  // Generalize pre-condition
+  def relax(name: String, pred: Pred) = step {
+    case a @ Algorithm(v, args, pre, expr) =>
+      val w = v.rename(name)
+      val pre1 = 
+        if (! SMT.prove(pre implies pred)) {
+          error("cannot relax precondition " + pre + " to " + pred)
+          pre
+        } else {
+          pred
+        }
+      (Algorithm(w, args, pre1, expr), Relax)
+  }
+
+  // Generalize variable application
+  def genApp(name: String, ov: Var, nv: Var, which: Int = 0) = step {
+    case Algorithm(v, args, pre, e) =>
+      val w = Var(name, v.arity + 1)
+      val args1 = args.map(_.fresh)
+      var op: Option[OpVar] = None
+      var i = -1
+      (Algorithm(w, args :+ nv, pre, transform(e) {
+       case app @ App(u: Var, uargs) if u == ov =>
+          i = i + 1
+          if (i == which) {
+            val nvargs = uargs.take(nv.arity)
+            val nvargs1 = nvargs.map(v => Var.fresh(arity = v.arity))
+            op = Some(OpVar(ov, nvargs1, nvargs1 ++ uargs.drop(nv.arity)))
+            App(nv, nvargs)
+          } else {
+            app
+          }          
+      }), Refine(OpVar(w, args1, args1 :+ (op match {
+          case Some(op) => op           
+          case None => nv
+        }))))
+    }
+}
+
+trait Unification {
   // Complete OpVar of c based on op
   import collection.mutable.ListBuffer
   def unify(c: Algorithm, op: (Var, Expr)*) {
@@ -760,143 +920,16 @@ class Proof {
     }
   }
 
-  var SKIP_FIRST = false
-    
-  // Prove by induction that pred(v) => c(v) = c(f(v)) where d = OpVar(c, f)
-  def proveEq(pred: Pred, ov: Algorithm, nv: Algorithm, op: Funct, 
-    hint1: Refinement, hint2: Refinement): Boolean = {
-    assert (nv.v == op.v)
-    // check domains: d is well defined for substitution
-    val domain = (pred and ov.pre) implies nv.pre.s(nv.args zip App(op, ov.args).flatten.args)
-    if (! SMT.prove(domain)) {
-      error("failed domain check")
-      return false
-    }
-
-    // apply proof hint and get expression
-    val oexpr = flatten(hint1(Algorithm(ov.v, ov.args, pred and ov.pre, ov.expr)).expr)
-
-    // prove by induction on v (c's metric)
-    // inductive step
-    var skip = SKIP_FIRST
-    val oind = flatten(visit(oexpr)(pred and ov.pre, exprTransformer {
-      case (path, app @ App(v, args)) if v == ov.v => 
-        if (SMT.check(path and ! pred.s(ov.args zip args))) {
-          // violation of the inductive step predicate
-          app
-        } else {          
-          if (skip) {
-            // force skip for base case
-            skip = false
-            app
-          } else {
-            // by induction hypothesis
-            App(op, args)
-          }
-        }
-    }))
-    val nind = flatten(hint2(Algorithm(nv.v, nv.args, nv.pre, 
-      nv.expr.s(nv.args zip App(op, ov.args).flatten.args))).expr)
-  
-    if (! SMT.prove((pred and ov.pre) implies (oind === nind))) {
-      msg("pred")
-      println(pred)
-      msg("oind")
-      println(oind)
-      msg("nind")
-      println(nind)
-      error("failed to prove equation equality")
-      return false
-    }
-   
-    return true
-  }
-
-
-
-  // Unroll application to c
-  def unfold(name: String, c: Algorithm) = step {
-    case Algorithm(v, args, pre, expr) =>
-      val w = v.rename(name)
-      (Algorithm(w, args, pre, transform(flatten(expr)) {
-        case App(w, wargs) if w == c.v =>
-          c.expr.s(c.args zip wargs)
-      }), Refine(w))
-  }
-        
-  // Split "k in range(a,b) into k1 in range(a,e) and k2 in range(e,b)
-  def splitRange(name: String, k: Var, mid: Expr) = step {
-    case Algorithm(v, args, pre, expr) =>
-      val w = v.rename(name)
-      (Algorithm(w, args, pre, visit(expr)(pre, seqTransformer {
-        case (path, compr @ Compr(e, v, Range(l, h))) if v == k => 
-          if (! SMT.prove(path implies (l <= mid and mid <= h))) {
-            error("can't split range")
-            compr
-          } else {
-            val v1 = Var(v.name + "1")
-            val v2 = Var(v.name + "2")
-            Join(Compr(substitute(e, Map(v->v1)), v1, Range(l, mid)), 
-                Compr(substitute(e, Map(v->v2)), v2, Range(mid, h)))
-          }
-      })), Refine(w))
-  }
-
-  // Fix a value for which old function symbol is used
-  def guard(name: String, pred: Pred) = step {
-    case Algorithm(v, args, pre, expr) =>
-      val w = v.rename(name)
-      (Algorithm(w, args, pre, IF (pred -> v(args:_*)) ELSE expr), Refine(w))
-  }
-
-  // Generalize pre-condition
-  def relax(name: String, pred: Pred) = step {
-    case a @ Algorithm(v, args, pre, expr) =>
-      val w = v.rename(name)
-      val pre1 = 
-        if (! SMT.prove(pre implies pred)) {
-          error("cannot relax precondition " + pre + " to " + pred)
-          pre
-        } else {
-          pred
-        }
-      (Algorithm(w, args, pre1, expr), Relax)
-  }
-
-  // Generalize variable application
-  def genApp(name: String, ov: Var, nv: Var, which: Int = 0) = step {
-    case Algorithm(v, args, pre, e) =>
-      val w = Var(name, v.arity + 1)
-      val args1 = args.map(_.fresh)
-      var op: Option[OpVar] = None
-      var i = -1
-      (Algorithm(w, args :+ nv, pre, transform(e) {
-       case app @ App(u: Var, uargs) if u == ov =>
-          i = i + 1
-          if (i == which) {
-            val nvargs = uargs.take(nv.arity)
-            val nvargs1 = nvargs.map(v => Var.fresh(arity = v.arity))
-            op = Some(OpVar(ov, nvargs1, nvargs1 ++ uargs.drop(nv.arity)))
-            App(nv, nvargs)
-          } else {
-            app
-          }          
-      }), Refine(OpVar(w, args1, args1 :+ (op match {
-          case Some(op) => op           
-          case None => nv
-        }))))
-    }
 }
-
 
 object Parenthesis {
   import Prelude._
   implicit def int2expr(i: Int) = Const(i)
 
-  val c = Var("c", 2)
   val w = Var("w", 3)
   val x = Var("x", 1)
   
+  val c = Var("c", 2)
   val par = Algorithm(c, i :: j :: Nil,
     0 <= i and i < n and i < j and j < n,
     IF ((i === j-1) -> x(i)) 
@@ -906,16 +939,13 @@ object Parenthesis {
 
    
   def main(args: Array[String]) {
-    import Console.println
-    import Transform._
-
     SMT.open()
-    def $ = Var.fresh().name
-    
     val proof = new Proof()
     import proof._
-    STRICT = true
 
+    addInput(w)
+    addInput(x)
+    addAlg(par)
     induction(par, j-i, 1)
 
     val r = Var("r", 2)
@@ -964,7 +994,7 @@ object Parenthesis {
     val D = Algorithm(d, List(i, j, n, w, r, s, t),
       0 <= i and i < n/2 and 0 <= j and j < n/2,
       Op(Reduce(s(i, k) + t(k, j) + w(i, k, j) where k in Range(0, n/2)), r(i, j)))
-    println(D)
+    addAlg(D)
      
     val i0 = Var("i0")
     val j0 = Var("j0")
@@ -1038,6 +1068,7 @@ object Parenthesis {
 
 
     println(COUNTER + " refinements")
+    pythonize()
     //GraphViz.display(steps)
     SMT.close()
   }
@@ -1085,15 +1116,9 @@ object Floyd {
       (f(i, j, k-1) + f(i, k-1, k-1) * f(k-1, j, k-1)))
 
   def main(args: Array[String]) {
-    import Console.println
-    import Transform._
-
     SMT.open()
-    def $ = Var.fresh().name
-    
     val proof = new Proof()    
     import proof._
-    STRICT = true
 
     induction(F, k, 0)
     val a = (introduce($, n, r) andThen selfRefine("a"))(F)

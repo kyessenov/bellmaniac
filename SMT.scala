@@ -74,7 +74,10 @@ class Z3 extends Solver {
   import java.io._
 
   // Requires version 4.3.2
-  private def BINARY = "smt/z3"
+  private def BINARY = Option(System.getProperty("smt.home")) match {
+    case Some(path) => path
+    case None => System.getProperty("user.home") + "/opt/z3-4.3.2/bin/z3"
+  }
 
   private def PARAMS ="-smt2" :: "-in" :: "-nw" :: Nil
 
@@ -98,8 +101,6 @@ class Z3 extends Solver {
   command("(set-option :auto-config false)") 
 
   // command("(set-option :produce-models true)")
-  // command("(set-option :elim-quantifiers true)")
-  // command("(set-option :ematching false)")
  
   override def close() {
     input.close; 
