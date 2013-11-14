@@ -93,8 +93,10 @@ case class Minus(l: Expr, r: Expr) extends BinaryExpr
 case class Times(l: Expr, r: Expr) extends BinaryExpr
 case class Div(l: Expr, r: Expr) extends BinaryExpr
 case class Mod(l: Expr, r: Expr) extends BinaryExpr
+// Monadic operation
+case class Op(l: Expr, r: Expr) extends BinaryExpr
 object Zero extends Expr
-case class Reduce(range: Seq, init: Expr = Zero) extends Expr 
+case class Reduce(range: Seq) extends Expr 
 
 // Functions
 sealed trait Funct extends Expr {
@@ -180,7 +182,7 @@ object Vars {
     case e: BinaryExpr => apply(e.l) ++ apply(e.r)
     case Zero | Havoc => Set()
     case _: Const => Set() 
-    case Reduce(range, init) => apply(range) ++ apply(init)
+    case Reduce(range) => apply(range)
     case v: Var => Set(v)
     case OpVar(v, args, exprs) => exprs.toSet[Expr].flatMap(apply(_)) ++ Set(v) -- args.toSet
     case App(v, args) => args.toSet[Expr].flatMap(apply(_)) ++ apply(v)
@@ -223,7 +225,8 @@ zero = 10000000000000000000000000000
     case Div(l, r) => print(l) + "/" + print(r)
     case Mod(l, r) => "(" + print(l) + " mod " + print(r) + ")"
     case App(v, args) => print(v) + "(" + args.map(print(_)).mkString(", ") + ")"
-    case Reduce(r, init) => "reduce(plus, " + print(r) + ", " + print(init) + ")"
+    case Op(l, r) => "plus(" + print(l) + ", " + print(r) + ")"
+    case Reduce(r) => "reduce(plus, " + print(r) + ")"
     case Zero => "zero"
     case Havoc => "None"
     case OpVar(v, args, exprs) => "(lambda " + args.map(print(_)).mkString(", ") + 
@@ -277,8 +280,8 @@ object SMT {
       val v = Var.fresh()
       side += "(declare-const " + v.name + " Int)"
       print(v)
-    case Reduce(r, init) => // "(reduce " + print(r) + " " + print(init) + ")"
-      "(+ " + print(r) + " " + print(init) + ")"
+    case Op(l, r) => "(plus " + print(l) + " " + print(r) + ")"
+    case Reduce(r) => "(reduce " + print(r) + ")"
     case a: App => a.flatten match {
       case App(Var(n, k), args) => "(" + n + " " + args.map(print(_)).mkString(" ") + ")"
       case _ => ???
@@ -289,10 +292,8 @@ object SMT {
     }
   }
   def print(s: Seq)(implicit side: ListBuffer[String]): String = s match {
-    case Singleton(e) => //"(singleton " + print(e) + ")"
-      print(e)
-    case Join(l, r) => // "(join " + print(l) + " " + print(r) + ")"
-      "(+ " + print(l) + " " + print(r) + ")"
+    case Singleton(e) => "(singleton " + print(e) + ")"
+    case Join(l, r) => "(join " + print(l) + " " + print(r) + ")"
     case Compr(e, v, Range(l, h)) => "(compr " + 
       print(e.s(List(v->(iterator+l)))) + " " + print(h-l) + ")"
   }
@@ -317,7 +318,7 @@ object SMT {
   def check(p: Pred) = ! prove(! p)
 
   // Prove the predicate by checking for counter example.
-  // Returns true if the solver says "unsat", false if "sat" or "unknown"
+  // Returns true if the solver says "unsat" for !p, false if "sat" or "unknown"
   def prove(p: Pred) = {
     val side = new ListBuffer[String]
     for (v <- Vars(p)) {
@@ -349,17 +350,40 @@ object SMT {
 
   def open() {
     z3 = new Z3
-    //z3.command("(declare-sort Seq)")
     z3.command("(declare-fun zero () Int)")
+    z3.command("(declare-fun plus (Int Int) Int)")
+    // substitute + for plus
+    //z3.command("(define-fun plus ((a Int) (b Int)) Int (+ a b))")
+
+    // zero for plus
+    z3.command("(assert (forall ((x Int)) (= (plus x zero) x)))")
+    z3.command("(assert (forall ((x Int)) (= (plus zero x) x)))")
+
+    // plus is commutative
+    z3.command("(assert (forall ((x Int) (y Int)) (= (plus x y) (plus y x))))")
+    z3.command("(assert (forall ((x Int) (y Int) (z Int)) (= (plus x (plus y z)) (plus (plus x y) z))))") 
+
+    // monoid
+    z3.command("(declare-sort M)")
+    z3.command("(declare-fun reduce (M) Int)")
+    z3.command("(declare-fun join (M M) M)")
+    z3.command("(declare-fun compr (Int Int) M)")
+
+    // push reduce down
+    z3.command("(assert (forall ((x M) (y M)) (= (reduce (join x y)) (plus (reduce x) (reduce y)))))")
+
+    // eliminate singleton
+    z3.command("(declare-fun singleton (Int) M)")
+    z3.command("(assert (forall ((x Int)) (= (reduce (singleton x)) x)))")
+
+    // eliminate empty comprehension
+    z3.command("(assert (forall ((x Int)) (= (reduce (compr x 0)) zero)))")
+ 
     // iterator
     z3.command("(declare-fun " + iterator.name + " () Int)")
     // equality witnesses
     for (w <- witness) 
       z3.command("(declare-fun " + w.name + " () Int)")    
-    //z3.command("(declare-fun reduce (Seq Int) Int)")
-    //z3.command("(declare-fun join (Seq Seq) Seq)")
-    z3.command("(declare-fun compr (Int Int) Int)")
-    //z3.command("(declare-fun singleton (Int) Seq)")
   }
 
   def close() {
@@ -402,7 +426,8 @@ object Transform {
         case Mod(l, r) => Mod(visit(l), visit(r))
         case App(v, args) => 
           App(visit(v).asInstanceOf[Funct], args.map(visit(_)))
-        case Reduce(range, init) => Reduce(visit(range), visit(init))
+        case Op(l, r) => Op(visit(l), visit(r))
+        case Reduce(range) => Reduce(visit(range))
         case OpVar(v, args, exprs) => 
           OpVar(v, 
             args.map(visit(_).asInstanceOf[Var]), 
@@ -531,7 +556,6 @@ class Proof {
 
   def id: Refinement = identity[Algorithm]
 
-  // Apply an induction step
   def step(f: Algorithm => (Algorithm, Step)): Refinement = {
     case x: Algorithm => 
       val (out, stp) = f(x)
@@ -556,6 +580,18 @@ class Proof {
       error("failed base case check")
   }
 
+  // Substitute the body of an algorithm
+  def manual(name: String, body: Expr, hint: Refinement = id) = step {
+    case in @ Algorithm(v, args, pre, e) =>
+      val out = Algorithm(v.rename(name), args, pre, body)
+      val out1 = hint(out)
+      if (! SMT.prove(pre implies (e === out1.expr))) {        
+        error("failed to prove equivalence of body expressions")
+        (in, Refine(v))
+      } else
+        (out, Refine(out.v))
+  }
+
   // Add parameters to a function 
   def introduce(name: String, vs: Var*) = step {
     case Algorithm(v, args, pre, e) => 
@@ -565,7 +601,7 @@ class Proof {
        Refine(OpVar(w, args1, args1 ++ vs.toList)))        
   }
 
-  // Push functions down refinement chain
+  // Push self-application down the refinement chain
   // todo: check termination
   def selfRefine(name: String) = step {
     case Algorithm(v, args, pre, e) =>
@@ -578,6 +614,7 @@ class Proof {
       (Algorithm(w, args, pre, push(e)), Refine(w))
   }
 
+  // Push functions down refinement chain
   def refine(name: String, from: Var, to: Var) = step {
     case Algorithm(v, args, pre, e) =>
       val w = v.rename(name)
@@ -705,7 +742,6 @@ class Proof {
         unify(c.default, d.default)
       case (c: Reduce, d: Reduce) =>
         unify(c.range, d.range)
-        unify(c.init, d.init)
       case (c: Join, d: Join) =>
         unify(c.l, d.l)
         unify(c.r, d.r)
@@ -806,12 +842,14 @@ class Proof {
       })), Refine(w))
   }
 
+  // Fix a value for which old function symbol is used
   def guard(name: String, pred: Pred) = step {
     case Algorithm(v, args, pre, expr) =>
       val w = v.rename(name)
       (Algorithm(w, args, pre, IF (pred -> v(args:_*)) ELSE expr), Refine(w))
   }
 
+  // Generalize pre-condition
   def relax(name: String, pred: Pred) = step {
     case a @ Algorithm(v, args, pre, expr) =>
       val w = v.rename(name)
@@ -857,7 +895,6 @@ object Parenthesis {
 
   val c = Var("c", 2)
   val w = Var("w", 3)
-  val r = Var("r", 2)
   val x = Var("x", 1)
   
   val par = Algorithm(c, i :: j :: Nil,
@@ -867,14 +904,7 @@ object Parenthesis {
       Reduce(c(i, k) + c(k, j) + w(i, k, j) 
       where k in Range(i+1, j)))
 
-  // TODO missing step from par to par0
-  // r(i, i-1) = x(i)
-
-  val par0 = Algorithm(c, i :: j :: Nil, 
-    0 <= i and i < n and i < j and j < n, 
-    Reduce(c(i, k) + c(k, j) + w(i, k, j) 
-      where k in Range(i+1, j), r(i, j)))
-    
+   
   def main(args: Array[String]) {
     import Console.println
     import Transform._
@@ -887,6 +917,13 @@ object Parenthesis {
     STRICT = true
 
     induction(par, j-i, 1)
+
+    val r = Var("r", 2)
+    val R = Algorithm(r, List(i, j), True, IF ((i === j-1) -> x(i)) ELSE Zero)
+    val par0 = manual($, 
+      Op(Reduce(c(i, k) + c(k, j) + w(i, k, j) where k in Range(i+1, j)), r(i, j)),
+      unfold($, R))(par)
+
     val c0 = (introduce($, n, w, r) andThen 
       selfRefine("c0"))(par0)    
     val List(c1, c000, c001, c011) = partition("c1", n < 4, i < n/2, j < n/2)(c0) 
@@ -926,7 +963,7 @@ object Parenthesis {
     val d = Var("d", 7)
     val D = Algorithm(d, List(i, j, n, w, r, s, t),
       0 <= i and i < n/2 and 0 <= j and j < n/2,
-      Reduce(s(i, k) + t(k, j) + w(i, k, j) where k in Range(0, n/2), r(i, j)))
+      Op(Reduce(s(i, k) + t(k, j) + w(i, k, j) where k in Range(0, n/2)), r(i, j)))
     println(D)
      
     val i0 = Var("i0")

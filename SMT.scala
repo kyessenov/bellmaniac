@@ -14,8 +14,10 @@ trait Solver {
     //println("Z3: " + s)
     >(s);
     val reply = <();
-    if (reply != "success") 
+    if (reply != "success") {
+      println(s)
       throw SolverException("unexpected reply: " + reply)
+    }
   }
   /** Check satisfiability. */
   def check(): Result = {
@@ -71,10 +73,8 @@ trait Logging extends Solver {
 class Z3 extends Solver {
   import java.io._
 
-  private def BINARY = Option(System.getProperty("smt.home")) match {
-    case Some(path) => path
-    case None => System.getProperty("user.home") + "/opt/z3/bin/z3"
-  }
+  // Requires version 4.3.2
+  private def BINARY = "smt/z3"
 
   private def PARAMS ="-smt2" :: "-in" :: "-nw" :: Nil
 
@@ -91,15 +91,16 @@ class Z3 extends Solver {
   override def <() = output.readLine 
 
   command("(set-option :print-success true)")
-  command("(set-option :produce-models true)")
-  command("(set-option :elim-quantifiers true)")
-  command("(set-option :ematching false)")
-  
+ 
   // Disable MBQI
   // See: http://stackoverflow.com/questions/17706219/defining-a-theory-of-sets-with-z3-smt-lib2 
-  command("(set-option :mbqi false)")
+  command("(set-option :smt.mbqi false)")
   command("(set-option :auto-config false)") 
 
+  // command("(set-option :produce-models true)")
+  // command("(set-option :elim-quantifiers true)")
+  // command("(set-option :ematching false)")
+ 
   override def close() {
     input.close; 
     output.close; 
