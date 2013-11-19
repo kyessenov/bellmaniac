@@ -25,7 +25,7 @@ trait Logger {
 }
 
 object GraphViz {
-  type Graph[V, L] = collection.mutable.MultiMap[V, (V, L)]
+  type Graph[V, L] = List[(V, L, V)]
   import java.io.{PrintStream, File}
 
   def clean(s: Any) = 
@@ -35,8 +35,7 @@ object GraphViz {
     out println  "digraph tmp {";    
     out println  "  node [shape=box] "
    
-    for ((from, vs) <- g;
-         (to, l) <- vs)
+    for ((from, l, to) <-g)
       out.println("\"" + clean(from) + "\"->\"" + clean(to) + "\" [label=\"" + l +"\"]");
     out println "}";
   }
