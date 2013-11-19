@@ -1,7 +1,9 @@
-sealed trait Term 
+sealed trait Computation {
+  def v: Var
+}
 
 // Recursive algorithm definition
-case class Algorithm(v: Var, args: List[Var], pre: Pred, expr: Expr) {
+case class Algorithm(v: Var, args: List[Var], pre: Pred, expr: Expr) extends Computation {
   assert (v.arity == args.size)
   override def toString = Python.print(this)
   // Extend to application of that by supplying remaining arguments 
@@ -25,9 +27,11 @@ case class Algorithm(v: Var, args: List[Var], pre: Pred, expr: Expr) {
 }
 
 // Input table (v arguments are one-dimensional)
-case class Input(v: Var) {
+case class Input(v: Var) extends Computation {
   override def toString = Python.print(this)
 }
+
+sealed trait Term 
 
 // Boolean predicate
 sealed trait Pred extends Term {
@@ -68,9 +72,19 @@ case class Not(p: Pred) extends Pred
 
 // Expression language
 sealed trait Expr extends Term {
-  def +(that: Expr) = Plus(this, that)
+  def +(that: Expr) = (this, that) match {
+    case (Const(0), e) => e
+    case (e, Const(0)) => e
+    case _ => Plus(this, that)
+  }
   def -(that: Expr) = Minus(this, that)
-  def *(that: Expr) = Times(this, that)
+  def *(that: Expr) = (this, that) match {
+    case (Const(0), e) => Const(0)
+    case (Const(1), e) => e
+    case (e, Const(0)) => Const(0)
+    case (e, Const(1)) => e
+    case _ => Times(this, that) 
+  }
   def /(that: Expr) = Div(this, that)
   def mod(that: Expr) = Mod(this, that)
   def ===(that: Expr) = Eq(this, that)
@@ -126,7 +140,6 @@ sealed trait Funct extends Expr {
     assert (offset.size == arity)
     val args = (1 to arity).map(_ => Var.fresh()).toList
     OpVar(this, args, (args zip offset.toList).map {
-        case (v, off) if off == Const(0) => v
         case (v, off) => v + off 
     })
   }
@@ -168,6 +181,10 @@ case class OpVar(v: Funct, args: List[Var], exprs: List[Expr]) extends Funct {
   assert(v.arity == exprs.size, "wrong number of arguments in translation")
   override def arity = args.size
   override def compose(that: Funct) = OpVar(that, args, exprs)
+  // Normalize to functor a pure Var
+  def flatten: OpVar = App(this, args).flatten match {
+    case App(w, wexprs) => OpVar(w, args, wexprs)
+  }
 }
 case class App(v: Funct, args: List[Expr]) extends Expr {
   assert(v.arity == args.size, "wrong number of arguments in " + this)
@@ -214,8 +231,7 @@ object Vars {
 
 object Python {
   val prelude = 
-"""
-#!/usr/bin/python
+"""#!/usr/bin/python
 class memoize(dict):
   def __init__(self, func):
     self.func = func
@@ -282,11 +298,14 @@ sys.setrecursionlimit(2 ** 16)
       case e => "  return " + print(e)
     }}
   }
-  def print(i: Input): String = {
-    "@memoize\ndef " + print(i.v) + "(" + 
-      (1 to i.v.arity).map("v"+_).mkString(", ") + "):\n" +
-    "  return random.randint(0, 1000)" 
-  }
+  def print(i: Input): String = 
+    if (i.v.arity == 0)
+      print(i.v) + " = 16" 
+    else 
+      "@memoize\ndef " + print(i.v) + "(" + 
+        (1 to i.v.arity).map("v"+_).mkString(", ") + "):\n" +
+      "  return random.randint(0, 1000)" 
+  
 }
 
 object SMT {
@@ -526,6 +545,9 @@ object Transform {
     case a: App => a.flatten match {
       case App(v, args) => App(v, args.map(flatten(_)))
     }
+    case op: OpVar => op.flatten match {
+      case OpVar(v, args, exprs) => OpVar(v, args, exprs.map(flatten(_)))
+    }
   }
 }
 
@@ -546,6 +568,15 @@ trait Environment extends Logger {
       case None =>
         algorithms = alg :: algorithms
       case _ =>
+    }
+
+  def get(v: Var): Option[Computation] = 
+    inputs.find(_.v == v) match {
+      case Some(in) => Some(in)
+      case None => algorithms.find(_.v == v) match {
+        case Some(alg) => Some(alg)
+        case None => None
+      }
     }
     
   // Refinement chains (v, op, w) where v is refined by w
@@ -606,15 +637,24 @@ trait Environment extends Logger {
     algorithms.filter { a => ! refines.exists(_._1 == a) }
 
   // Push down algorithms down the refinement chain to the leafs
+  // TODO: global termination checks (especially in splits)
   def refineAll: List[Algorithm] = {
+    // TODO: hack to avoid obvious self-loops
+    var keep: List[Algorithm] = Nil
+
     // stack awareness
-    def lower(s: List[Var], e: Expr): Expr = transform(e) {
+    def lower(s: List[Var], e: Expr)(implicit ctx: Algorithm): Expr = transform(e) {
       case v: Var if ! s.contains(v) => 
         if (inputs.exists(_.v == v) || leaves.exists(_.v == v)) 
           v
         else leaves.find { a => lift(v, a.v).isDefined } match {
           case Some(a) => 
-            lower(s, lift(v, a.v).get)
+            if (a == ctx) {
+              message("WARNING: keeping " + v + " in " + ctx.v)
+              keep = algorithms.find(_.v == v).get :: keep
+              v
+            } else
+              lower(s, lift(v, a.v).get)
           case None => 
             error("can't locate leaf for " + v)
             v
@@ -626,23 +666,102 @@ trait Environment extends Logger {
     }
   
     // modify bodies to refer only to leaves
-    val out = for (Algorithm(v, args, pre, e) <- leaves)  
-      yield Algorithm(v, args, pre, flatten(lower(args, e)))
+    val out = for (leaf @ Algorithm(v, args, pre, e) <- leaves)  
+      yield Algorithm(v, args, pre, flatten(lower(args, e)(leaf)))
       
-    out
+    out ::: keep
+  }
+
+  // Generalize arguments by adding offsets to every argument function
+  // Assumes argument functions do not take functions as parameters
+  def offsettify(p: List[Algorithm]) = {    
+    // STAGE ONE
+
+    def offsets(v: Var) = {
+      assert (v.arity > 0)
+      for (i <- 0 to v.arity - 1) 
+        yield Var(v.name + "_" + i)
+    }
+
+    // extended argument list
+    def extended(args: List[Var]) = args ::: {
+      for (v <- args if v.arity > 0;
+           arg <- offsets(v))
+        yield arg
+    }
+
+    def extend(e: Expr)(implicit args: List[Var]): Expr = transform(e) {
+      case v: Var if v.arity > 0 =>
+        if (args.contains(v)) 
+          v >> (offsets(v):_*)
+        else if (inputs.exists(_.v == v))
+          v
+        else p.find(_.v == v) match {
+          case Some(a) =>
+            val args1 = extended(a.args)            
+            a.lift(Var(a.v.name, args1.size))(1 to (args1.size - a.args.size) map (_ => Const(0)) :_*)
+          case None => 
+            error("unknown variable: " + v)
+            ???
+        }
+    }    
+
+    // add offset arguments to inputs and all applications
+    val p1 = 
+      for (Algorithm(v, args, pre, e) <- p;
+           args1 = extended(args))                  
+        yield Algorithm(Var(v.name, args1.size), args1, pre, extend(e)(args))
+  
+    // STAGE TWO
+
+    // Make use of offsets to eliminate OpVars
+    def linearize(e: Expr): Expr = transform(flatten(e)) {
+      case App(v, vargs) if p1.exists(_.v == v) =>
+        val a = p1.find(_.v == v).get
+        val args = vargs.map(linearize)
+
+        var offsets: List[(Var, Expr)] = Nil
+        val linearized = (a.args zip args) map {
+          case (formal, actual: OpVar) => Linear.offsets(actual) match {
+            case Some((w, offs)) => 
+              offsets :::= offs.zipWithIndex.map { 
+                case (o, i) => (Var(formal.name + "_" + i), o) 
+              }
+              w              
+            case None => 
+              println("can't linearize " + actual)
+              actual            
+          }
+          case (_, actual) => actual
+        }
+        val combined = (a.args zip linearized) map {
+          case (formal, actual) => actual + offsets.toMap.getOrElse(formal, Const(0))
+        }
+        App(v, combined)
+      case op @ OpVar(v, args, exprs) if p1.exists(_.v == v) => 
+        linearize(App(op, args)) match {
+          case App(w, wargs) => 
+            assert(w == v)
+            OpVar(v, args, wargs)
+          case _ => ???
+        }
+    }
+
+    val p2 = for (Algorithm(v, args, pre, e) <- p1)
+      yield Algorithm(v, args, pre, linearize(e))
+
+    p2
   }
 
   // hack to avoid non-termination for now
-  def compile(main: Algorithm, keep: List[Algorithm] = Nil, out: PrintStream = Console.out) {
+  def compile(main: Algorithm, out: PrintStream = Console.out) {
     assert(algorithms.contains(main))
 
     //showGraph() 
     out.println(Python.prelude)   
     for (input <- inputs) 
       out.println(input)   
-    for (alg <- refineAll)
-      out.println(alg)
-    for (alg <- keep)
+    for (alg <- offsettify(refineAll))
       out.println(alg)
     
     // print test function
@@ -665,17 +784,22 @@ class Proof extends Environment {
   def $$ = new Proof
 
   // Check induction
+  // todo: global induction
   def induction(a: Algorithm, metric: Expr, base: Expr) {
     visit(a.expr)(a.pre, exprTransformer {
       case (path, app @ App(v, args)) if v == a.v =>
-        if (! SMT.prove(path implies (metric.s(a.args zip args) < metric))) {
-          error("failed induction check on " + a.v + " at " + app) 
-        }
+        if (! SMT.prove(path implies (metric.s(a.args zip args) < metric))) 
+          error("failed induction check on " + a.v + " at " + app)         
         app
     })
     
     if (! SMT.prove(a.pre implies (base <= metric)))
       error("failed base case check")
+  }
+
+  // check for pre-conditions
+  def welldefined(pre: Pred, e: Expr) = {
+    ???
   }
   
   // Identity
@@ -800,7 +924,7 @@ class Proof extends Environment {
         Algorithm(w, args, pre, 
           visit(e)(pre, exprTransformer {
             case (path, App(w, args)) if w == ov.v && 
-              proveEq(path, ov, nv, op, hint1, hint2) =>
+              inductiveProof(path, ov, nv, op, hint1, hint2) =>
               (App(op, args).flatten)
           }))
     }
@@ -810,7 +934,7 @@ class Proof extends Environment {
   var SKIP_FIRST = false
     
   // Prove by induction that pred(v) => c(v) = c(f(v)) where d = OpVar(c, f)
-  def proveEq(pred: Pred, ov: Algorithm, nv: Algorithm, op: Funct, 
+  def inductiveProof(pred: Pred, ov: Algorithm, nv: Algorithm, op: Funct, 
     hint1: Refinement, hint2: Refinement): Boolean = {
     // check domains: d is well defined for substitution
     val domain = (pred and ov.pre) implies nv.pre.s(nv.args zip App(op, ov.args).flatten.args)
@@ -862,10 +986,15 @@ class Proof extends Environment {
   def unfold(name: String, c: Algorithm) = step {
     case Algorithm(v, args, pre, expr) =>
       val w = v.rename(name)
-      Algorithm(w, args, pre, transform(flatten(expr)) {
-        case App(w, wargs) if w == c.v =>
+      Algorithm(w, args, pre, visit(flatten(expr))(pre, exprTransformer {
+        case (path, App(w, wargs)) if w == c.v =>
+          if (! SMT.prove(path implies c.pre.s(c.args zip wargs))) {
+            println("path: " + path)
+            println("pre: " + c.pre.s(c.args zip wargs))
+            error("violation of pre-condition in unfolding of " + c.v)          
+          }
           c.expr.s(c.args zip wargs)
-      })
+      }))
   }
         
   // Split "k in range(a,b)" into "k1 in range(a,e) and k2 in range(e,b)"
@@ -937,26 +1066,6 @@ class Proof extends Environment {
 trait Unification {
   // Complete OpVar of c based on op
   import collection.mutable.ListBuffer
-  def unify(c: Algorithm, op: (Var, Expr)*) {
-    val map = op.toMap   
-    val cvs = c.args
-    // assume we are given all 0-arity variables
-    // now infer remaining linear operators (including c itself)
-    var operators = Map[Var, LinearOp]()
-    val dvs = cvs.map { v =>
-      if (map.contains(v)) 
-        map(v)
-      else {
-        assert (v.arity > 0, "0-arity var " + v + " requires user input")
-        val w = v.fresh
-        w
-      }
-    }
-    implicit val buf = new ListBuffer[Pred]
-    unify(c.expr, c.expr.s(cvs zip dvs))  
-    for (p <- buf)
-      println(p)
-  }
 
   // Relaxed unification
   def unify(c: Term, d: Term)(implicit eqs: ListBuffer[Pred]) {
@@ -997,6 +1106,7 @@ trait Unification {
 
 object Parenthesis {
   import Prelude._
+  import java.io.{PrintStream, File}
   implicit def int2expr(i: Int) = Const(i)
 
   val w = Var("w", 3)
@@ -1018,12 +1128,14 @@ object Parenthesis {
 
     input(w)
     input(x)
+    input(n)
     add(par)
     induction(par, j-i, 1)
 
     val r = Var("r", 2)
     val R = Algorithm(r, List(i, j), True, IF ((i === j-1) -> x(i)) ELSE Zero)
     add(R)
+
     val par0 = manual($, 
       Op(Reduce(c(i, k) + c(k, j) + w(i, k, j) where k in Range(i+1, j)), r(i, j)),
       $$.unfold($, R))(par)
@@ -1034,9 +1146,13 @@ object Parenthesis {
   
     val c100 = rewrite("c100", c0)(n -> n/2)(c000) 
     // use free assumption n mod 2 = 0    
-    val c111 = rewrite("c111", c0)(i -> (i-n/2), j -> (j-n/2), n -> n/2, 
-      w->(w>>(n/2, n/2, n/2)), 
-      r->(r>>(n/2,n/2)))(c011)
+    val c111 = rewrite("c111", c0)(
+        i->(i-n/2), 
+        j->(j-n/2), 
+        n->n/2, 
+        w->(w>>(n/2,n/2,n/2)), 
+        r->(r>>(n/2,n/2))
+      )(c011)
 
     // We have to make a very general version of b0 to make proofs work
     val s = Var("s", 2)
@@ -1065,13 +1181,14 @@ object Parenthesis {
 
     // define d
     val d = Var("d", 7)
-    val D = Algorithm(d, List(i, j, n, w, r, s, t),
-      0 <= i and i < n/2 and 0 <= j and j < n/2,
+    val D = Algorithm(d, List(i, j, n, w, r, s, t), 0 < n,
       Op(Reduce(s(i, k) + t(k, j) + w(i, k, j) where k in Range(0, n/2)), r(i, j)))
     add(D)
      
     val bij = b0.capture(2) 
-    
+   
+    // TODO: violation of D precondition on Op
+
     // we can infer i and j displacements by looking at pre-condition of b0 and case of b000   
     val b100 = rewrite("b100", b0, $$.splitRange($, Var("k1"), n/4), $$.unfold($, D))(
         i->i,
@@ -1135,7 +1252,7 @@ object Parenthesis {
       t->(t>>(n/4,n/4))
     )(d11)
 
-    compile(par, List(D, b0, c0))
+    compile(par, new PrintStream(new File("out.py")))
     SMT.close()
   }
 }
@@ -1166,7 +1283,8 @@ object Gap {
 }
 
 object Floyd {
-  import Prelude._ 
+  import Prelude._
+  import java.io.{File, PrintStream}
   implicit def int2expr(i: Int) = Const(i)
 
   val r = Var("r", 2)
@@ -1186,7 +1304,11 @@ object Floyd {
     val proof = new Proof()    
     import proof._
 
+    input(r)
+    input(n)
+    add(F)
     induction(F, k, 0)
+
     val a = (introduce($, n, r) andThen selfRefine("a"))(F)
     val List(a1, a000, a001, a010, a011, a100, a101, a110, a111) = split("a1", n < 2,
         i < n/2, j < n/2, k <= n/2)(a)
@@ -1274,8 +1396,9 @@ object Floyd {
         k->(k-n/2), r->amid
       ))(a001) 
 
-    SKIP_FIRST = false 
-    compile(F)
+    SKIP_FIRST = false
+
+    compile(F, new PrintStream(new File("floyd.py")))
     SMT.close()
   }
 }

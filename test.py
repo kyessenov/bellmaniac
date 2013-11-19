@@ -97,6 +97,7 @@ def r(i, j):
   else:
     return zero
 def d(i, j, n, w, r, s, t):
+  print "d %d, %d, %d" % (i, j, n)
   # assert ((((0 <= i) and (i < n/2)) and (0 <= j)) and (j < n/2))
   return plus(reduce(plus, [((s(i, k) + t(k, j)) + w(i, k, j)) for k in range(0, n/2)], zero), r(i, j))
 def b0(i, j, n, w, r, s, t, w1):

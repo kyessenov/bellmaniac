@@ -31,15 +31,21 @@ case class Rational(n: Int, d: Int) {
   def eq(that: Rational) =
     this.numer * that.denom == this.denom * that.numer
 
-  def expr = Const(numer) / Const(denom)
+  def expr = 
+    if (numer == 0)
+      Const(0)
+    else if (denom == 1)
+      Const(numer)
+    else
+      Const(numer) / Const(denom)
 }
 // Rational linear combination
 case class Linear(terms: Map[Var, Rational], free: Rational) {
   import Linear.{zero, one}
 
   def expr = 
-    terms.map { case (v, r) => v * r.expr }.fold(Const(0): Expr)(_ + _) + 
-    free.expr
+    free.expr +  
+    terms.map { case (v, r) => v * r.expr }.fold(Const(0): Expr)(_ + _)   
 
   def vars = terms.keys
   
@@ -51,11 +57,13 @@ case class Linear(terms: Map[Var, Rational], free: Rational) {
 
   def +(that: Linear) =
     Linear((this.vars ++ that.vars) map {
-      v => (v, this.proj(v) + that.proj(v))} toMap, this.free + that.free)
+      v => (v, this.proj(v) + that.proj(v))} toMap, 
+    this.free + that.free)
 
   def -(that: Linear) = 
     Linear((this.vars ++ that.vars) map {
-      v => (v, this.proj(v) - that.proj(v))} toMap, this.free - that.free)
+      v => (v, this.proj(v) - that.proj(v))} toMap, 
+    this.free - that.free)
 
   def *(i: Rational) =
     Linear(terms.mapValues(_*i), free*i)
@@ -85,8 +93,17 @@ object Linear {
     } catch {
       case NonLinear => None
     }
+
+  // extract offsets from expressions if possible
+  def offsets(op: OpVar): Option[(Var, List[Expr])] = op.flatten match {
+    case OpVar(v: Var, args, exprs) if args.size == exprs.size =>
+      val offsets = (exprs zip args) flatMap { case (e, arg) => Linear(e - arg) }      
+      if (offsets.size == exprs.size &&
+          offsets.forall { o => args.forall { arg => o.proj(arg) eq zero }})
+        Some((v, offsets.map(_.expr)))
+      else
+        None
+    case _ => None
+  }
 }
 
-class LinearOp(args: List[Var]) {
-  // TODO: generate translation forms
-}
