@@ -228,31 +228,13 @@ object Vars {
       apply(default)
   }
 }
-
-object Python {
-  val prelude = 
-"""#!/usr/bin/python
-class memoize(dict):
-  def __init__(self, func):
-    self.func = func
-  def __call__(self, *args):
-    return self[args]
-  def __missing__(self, key):
-    result = self[key] = self.func(*key)
-    return result
-plus = min
-zero = 10000000000000000000000000000
-
-import random
-import sys
-sys.setrecursionlimit(2 ** 16)
-"""
-  // translate into python list/generator
+trait PythonPrinter {
+  def prelude: String
   def print(s: Seq): String = s match {
     case Singleton(e) => "[" + print(e) + "]"
     case Join(l, r) => print(l) + " + " + print(r)
     case Compr(e, v, Range(l, h)) => "[" + print(e) + " for " + print(v) + 
-      " in range(" + print(l) + ", " + print(h) + ")]"
+      " in xrange(" + print(l) + ", " + print(h) + ")]"
   }
   def print(e: Expr): String = e match {
     case Var(n, _) => n
@@ -287,27 +269,50 @@ sys.setrecursionlimit(2 ** 16)
     case LE(l, r) => "(" + print(l) + " <= " + print(r) + ")"
     case GE(l, r) => "(" + print(l) + " >= " + print(r) + ")"
   }
-  def print(a: Algorithm): String = {
-    "def " + print(a.v) +
-    "(" + a.args.map(print(_)).mkString(", ") + "):\n" +     
-    "  assert " + print(a.pre) + 
-    "\n" + { a.expr match {
-      case Cond(cases, default) => "  if " + cases.map { case (pred, expr) => 
-        print(pred) + ":\n    return " + print(expr) }.mkString("\n  elif ") + 
-        "\n  else:\n    return " + print(default)        
-      case e => "  return " + print(e)
-    }}
+  def print(c: Computation): String
+  def print(p: List[Computation], out: java.io.PrintStream) {
+    out.println(prelude)
+    for (c <- p)
+      out.println(print(c))
   }
-  def print(i: Input): String = 
-    if (i.v.arity == 0)
-      print(i.v) + " = 16" 
-    else 
-      "@memoize\ndef " + print(i.v) + "(" + 
-        (1 to i.v.arity).map("v"+_).mkString(", ") + "):\n" +
-      "  return random.randint(0, 1000)" 
-  
 }
-
+// Functional style code output
+object Python extends PythonPrinter {
+  override val prelude = 
+"""class memoize(dict):
+  def __init__(self, func):
+    self.func = func
+  def __call__(self, *args):
+    return self[args]
+  def __missing__(self, key):
+    result = self[key] = self.func(*key)
+    return result
+plus = min
+zero = 10000000000000000000000000000
+import random
+import sys
+sys.setrecursionlimit(2 ** 16)
+"""
+  def print(c: Computation): String = c match {
+    case a: Algorithm =>
+      "def " + print(a.v) +
+      "(" + a.args.map(print(_)).mkString(", ") + "):\n" +     
+      "  assert " + print(a.pre) + 
+      "\n" + { a.expr match {
+        case Cond(cases, default) => "  if " + cases.map { case (pred, expr) => 
+          print(pred) + ":\n    return " + print(expr) }.mkString("\n  elif ") + 
+          "\n  else:\n    return " + print(default)        
+        case e => "  return " + print(e)
+      }}
+    case Input(v) => 
+      if (v.arity == 0)
+        print(v) + " = 16" 
+      else 
+        "@memoize\ndef " + print(v) + "(" + 
+          (1 to v.arity).map("v"+_).mkString(", ") + "):\n" +
+        "  return random.randint(0, 1000)" 
+  }
+}
 object SMT {
   private var z3: Z3 = _
 
@@ -754,23 +759,11 @@ trait Environment extends Logger {
   }
 
   // hack to avoid non-termination for now
-  def compile(main: Algorithm, out: PrintStream = Console.out) {
-    assert(algorithms.contains(main))
-
-    //showGraph() 
-    out.println(Python.prelude)   
-    for (input <- inputs) 
-      out.println(input)   
-    for (alg <- offsettify(refineAll))
-      out.println(alg)
-    
-    // print test function
-    out.println(main)
-    leaves.find { a => lift(main.v, a.v).isDefined } match {
-      case Some(a) => out.println("# " + main.v + " == " + lift(main.v, a.v).get)
-      case None => ???
-    }
-
+  def compile(main: Algorithm, out: PrintStream = Console.out, 
+      printer: PythonPrinter = Python) {
+    //showGraph()     
+    val all = main :: inputs ::: offsettify(refineAll)
+    printer.print(all, out)
   }
 }
 
@@ -1252,7 +1245,12 @@ object Parenthesis {
       t->(t>>(n/4,n/4))
     )(d11)
 
-    compile(par, new PrintStream(new File("out.py")))
+
+    val py = new NumPython(2, """|  for df in xrange(1, n): 
+                                 |    for i in xrange(0, n-df):
+                                 |      j = i + df""".stripMargin)
+    
+    compile(par, new PrintStream(new File("paren.py")), py)
     SMT.close()
   }
 }
