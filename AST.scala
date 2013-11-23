@@ -238,7 +238,7 @@ trait PythonPrinter {
   }
   def print(e: Expr): String = e match {
     case Var(n, _) => n
-    case Const(i) => i.toString
+    case Const(i) => if (i >= 0) i.toString else "(- " + (-i).toString + ")"
     case Plus(l, r) => "(" + print(l) + " + " + print(r) + ")"
     case Minus(l, r) => "(" + print(l) + " - " + print(r) + ")"
     case Times(l, r) => print(l) + "*" + print(r)
@@ -321,7 +321,7 @@ object SMT {
     case Var(n, k) if k == 0 => n
     // apply to variable witnesses
     case v: Funct  => print(App(v, (1 to v.arity).map(i => witness(i-1)).toList))
-    case Const(i) => i.toString
+    case Const(i) => if (i >= 0) i.toString else "(- " + (-i).toString + ")"
     case Plus(l, r) => "(+ " + print(l) + " " + print(r) + ")"
     case Minus(l, r) => "(- " + print(l) + " " + print(r) + ")"
     case Times(l, r) => "(* " + print(l) + " " + print(r) + ")"
@@ -1119,6 +1119,9 @@ object Parenthesis {
     val proof = new Proof()
     import proof._
 
+    val loops = new LoopConstruct(par, 2)
+    loops.generate
+    
     input(w)
     input(x)
     input(n)

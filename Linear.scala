@@ -31,6 +31,12 @@ case class Rational(n: Int, d: Int) {
   def eq(that: Rational) =
     this.numer * that.denom == this.denom * that.numer
 
+  def >(that: Rational) =
+    this.numer * that.denom > this.denom * that.numer
+
+  def <(that: Rational) =
+    this.numer * that.denom < this.denom * that.numer
+
   def expr = 
     if (numer == 0)
       Const(0)
@@ -44,16 +50,22 @@ case class Linear(terms: Map[Var, Rational], free: Rational) {
   import Linear.{zero, one}
 
   def expr = 
-    free.expr +  
-    terms.map { case (v, r) => v * r.expr }.fold(Const(0): Expr)(_ + _)   
+    free.expr + 
+    vars.map(v => v * proj(v).expr).fold(Const(0): Expr)(_ + _)   
 
-  def vars = terms.keys
+  def vars = 
+    (for ((v, r) <- terms;
+         if (! (r eq zero)))
+      yield v).toSet
   
   def proj(v: Var) =
     if (terms.contains(v))
       terms(v)
     else 
       zero
+
+  def drop(v: Var) = 
+    Linear(terms - v, free)
 
   def +(that: Linear) =
     Linear((this.vars ++ that.vars) map {
