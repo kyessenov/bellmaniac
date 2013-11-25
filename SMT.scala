@@ -100,7 +100,8 @@ class Z3 extends Solver {
   command("(set-option :smt.mbqi false)")
   command("(set-option :auto-config false)") 
 
-  // command("(set-option :produce-models true)")
+  // Remember solution values whenever possible
+  command("(set-option :produce-models true)")
  
   override def close() {
     input.close; 
