@@ -93,6 +93,9 @@ object Parenthesis {
         r->D.gen(2)(i, j-n/4, n/2, w1>>(0,n/4,n/2), 
           r>>(0,n/2),s>>(0,n/4),bij>>(n/4,n/2))          
       )(b000)
+    val test = specialize($, b0)(b100)
+    println(b100)
+    println(test)
     val b111 = rewrite("b111", b0, $$.splitRange($, Var("k2"), n/4+n/2), $$.unfold($, D))(
         i->(i-n/4),
         j->(j-n/2),
