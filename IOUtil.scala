@@ -10,15 +10,14 @@ trait Logger {
   }
 
   // print an error
-  def error(s: => String) = 
+  def error(s: => String) = { 
+    val elts = Thread.currentThread().getStackTrace()
+    var caller = elts(3)
+    message("*** Error occurred in " + caller.getMethodName + " at " + caller.getLineNumber)
+    message(s)
     if (STRICT)
-      throw new RuntimeException(s)
-    else {
-      val elts = Thread.currentThread().getStackTrace()
-      var caller = elts(3)
-      message("*** Error occurred in " + caller.getMethodName + " at " + caller.getLineNumber)
-      message(s)
-    }
+      throw new RuntimeException
+  }
   
   def print(s: => Any) = Console.out.print(s.toString)
   def println(s: => Any) = Console.out.println(s.toString)

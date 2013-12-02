@@ -13,13 +13,11 @@ object Parenthesis {
     ELSE
       Reduce(c(i, k) + c(k, j) + w(i, k, j) 
       where k in Range(i+1, j)))
-
    
   def main(args: Array[String]) {
     SMT.open()
     val proof = new Proof()
     import proof._
-
    
     input(w)
     input(x)
@@ -60,7 +58,7 @@ object Parenthesis {
       genApp($, c011.v, t) andThen
       genApp($, w, w1) andThen
       selfRefine("b0"))(c001)
-   
+
     val List(b1, b000, b001, b010, b011) = split("b1", n < 4, i < n/4, j < n/2+n/4)(b0)
        
     val b110 = rewrite("b110", b0)(
@@ -93,9 +91,7 @@ object Parenthesis {
         r->D.gen(2)(i, j-n/4, n/2, w1>>(0,n/4,n/2), 
           r>>(0,n/2),s>>(0,n/4),bij>>(n/4,n/2))          
       )(b000)
-    val test = specialize($, b0)(b100)
-    println(b100)
-    println(test)
+    val b200 = specialize("b200", b0)(b100)
     val b111 = rewrite("b111", b0, $$.splitRange($, Var("k2"), n/4+n/2), $$.unfold($, D))(
         i->(i-n/4),
         j->(j-n/2),
@@ -107,6 +103,7 @@ object Parenthesis {
         r->D.gen(2)(i, j-n/4, n/2, w>>(n/4,n/2,n/2+n/4),
           r>>(n/4,n/2+n/4), bij>>(n/4,n/2), t>>(n/2,n/2+n/4))
       )(b011)
+    val b211 = specialize("b211", b0)(b111)
     val b101 = rewrite("b101", b0, 
         $$.splitRange($, Var("k1"), n/4) andThen $$.splitRange($, Var("k2"), n/4+n/2),
         $$.unfold($, D) andThen $$.unfold($, D))(
@@ -120,6 +117,7 @@ object Parenthesis {
           D.gen(2)(i, j, n/2, w>>(0,n/2,n/2+n/4), r>>(0,n/2+n/4), bij>>(0,n/2), t>>(n/2,n/2+n/4)), 
           s>>(0,n/4), bij>>(n/4,n/2+n/4))        
       )(b001)
+    val b201 = specialize("b201", b0)(b101)
 
     val List(d1, d00, d01, d10, d11) = split("d1", n < 4, i < n/4, j < n/4)(D)
     val d100 = rewrite("d100", D, $$.splitRange($, k, n/4), $$.unfold($, D))(
@@ -148,10 +146,8 @@ object Parenthesis {
       t->(t>>(n/4,n/4))
     )(d11)
 
-
-    val loops = new LoopConstruct(par, 2)
     val py = new NumPython(2)    
-    compile(par, new PrintStream(new File("paren.py")))
+    compile(par, new PrintStream(new File("paren.py")), py)
     SMT.close()
   }
 }

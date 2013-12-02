@@ -31,14 +31,7 @@ class Rational(n: Int, d: Int) {
   def positive = (numer > 0 && denom > 0) || (numer < 0 && denom < 0)
   def >(that: Rational) = (this - that).positive
   def <(that: Rational) = that > this
-  def expr = 
-    if (numer == 0)
-      Const(0)
-    else if (denom == 1)
-      Const(numer)
-    else
-      Const(numer) / Const(denom)
-  override def toString = expr.toString
+  override def toString = "" + numer + "/" + denom
 }
 // Rational linear combination
 case class Linear(terms: Map[Var, Rational], free: Rational) {
@@ -46,8 +39,8 @@ case class Linear(terms: Map[Var, Rational], free: Rational) {
   assert(terms.forall { case (k, v) => ! (v eq zero) })
 
   def expr = 
-    terms.map { case (v, r) => v * r.expr }.fold(Const(0): Expr)(_ + _) + 
-    free.expr
+    terms.map { case (v, r) => (Const(r.numer)*v)/Const(r.denom) }.fold(Const(0): Expr)(_ + _) + 
+    Const(free.numer)/Const(free.denom)
   def vars = terms.keys.toSet
   def proj(v: Var) =
     if (terms.contains(v))
@@ -97,7 +90,7 @@ object Linear {
     } catch {
       case _: NonLinear => None
     }
-
+ 
   // extract offsets from expressions if possible
   def offsets(op: OpVar): Option[(Funct, List[Expr])] = op.flatten match {
     case OpVar(v: Var, args, exprs) if args.size <= exprs.size =>
