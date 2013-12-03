@@ -22,12 +22,11 @@ object Parenthesis {
     input(w)
     input(x)
     input(n)
-    add(par)
-    induction(par, j-i, 1)
+    add(par, j-i)
 
     val r = Var("r", 2)
     val R = Algorithm(r, List(i, j), par.pre, IF ((i === j-1) -> x(i)) ELSE Zero)
-    add(R)
+    add(R, 0)
 
     val par0 = manual($, 
       Op(Reduce(c(i, k) + c(k, j) + w(i, k, j) where k in Range(i+1, j)), r(i, j)),
@@ -76,7 +75,7 @@ object Parenthesis {
     val d = Var("d", 7)
     val D = Algorithm(d, List(i, j, n, w, r, s, t), 0 <= i and i < n/2 and 0 <= j and j < n/2,
       Op(Reduce(s(i, k) + t(k, j) + w(i, k, j) where k in Range(0, n/2)), r(i, j)))
-    add(D)
+    add(D, 0)
      
     val bij = b0.capture(2) 
 

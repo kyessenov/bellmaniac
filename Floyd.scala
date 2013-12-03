@@ -22,8 +22,7 @@ object Floyd {
 
     input(r)
     input(n)
-    add(F)
-    induction(F, k, 0)
+    add(F, k)
 
     val a = (introduce($, n, r) andThen selfRefine("a"))(F)
     val List(a1, a000, a001, a010, a011, a100, a101, a110, a111) = split("a1", n < 2,
