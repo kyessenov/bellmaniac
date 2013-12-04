@@ -18,3 +18,7 @@
   2) Replace d calls with c calls, may need to invert f and/or apply-unapply function transformations.
   3) Unify! Later on we can use theorem proving to make SMT do the job for us but for now we need to infer f.
 
+
+Two issues with sharing state:
+* reusing the state (like in d case)
+* sharing across splits

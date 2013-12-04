@@ -98,14 +98,14 @@ from numpy import *
 
       // memory allocation function
       "def " + v.name +"_alloc(" + print(args.drop(dom)) + "):\n" + {
-        loop.inferBounds(args.take(dom), pre) match {
+        loop.inferBounds(args.take(dom), pre, false, true) match {
           case Some(ranges) =>
             for (Range(l, h) <- ranges)
               if (! SMT.prove(pre implies l >= Const(0)))
                 error("can't allocate memory with possibly negative index")
               "  return zeros((" + print(ranges.map(_.h)) + "), int)\n"
           case None => 
-            error("can't infer memory allocation bounds")
+            error("can't infer memory allocation bounds: " + pre)
             "  # can't compute bounds\n"
         }
       } + 
@@ -180,14 +180,14 @@ from numpy import *
     // find all recursion references
     def vectors = {
       var out: List[Vector] = Nil
-      visit(a.expr)(a.pre, exprTransformer {
-        case (path, App(v, vargs)) =>
+      transform(a) {
+        case (path, locals, App(v, vargs)) =>
           if (v == a.v)
             out = Vector(path, vargs.take(dim)) :: out
-          else if (! a.args.contains(v) && ! inputs.exists(_.v == v))
+          else if (! locals.contains(v) && ! inputs.exists(_.v == v))
             error("unexpected: " + v + " in " + a.v)
           Havoc
-      })
+      }
       out
     }
 
@@ -213,12 +213,12 @@ from numpy import *
       case e :: Nil => e
       case e :: p1 =>
         val e1 = MAX(p1, pred)
-        if (SMT.prove(pred implies e1 < e))
+        if (SMT.prove(pred implies e1 <= e))
           e
         else if (SMT.prove(pred implies e <= e1))
           e1
         else {
-          error("can't find max of " + p)
+          error("can't find max of " + p + " under " + pred)
           ???
         }
     }
@@ -229,30 +229,38 @@ from numpy import *
       case e :: Nil => e
       case e :: p1 =>
         val e1 = MIN(p1, pred)
-        if (SMT.prove(pred implies e < e1))
+        if (SMT.prove(pred implies e <= e1))
           e
         else if (SMT.prove(pred implies e1 <= e))
           e1
         else {
-          error("can't find min of " + p)
+          error("can't find min of " + p + " under " + pred)
           ???
         }
     }
 
     // Infer range constraints from linear constraints in predicate
-    def inferBounds(p: List[Var], pred: Pred): Option[List[Range]] = {
-      val eqs = Linear.equations(pred)
+    def inferBounds(p: List[Var], pred: Pred, 
+      use: Boolean = true, transitive: Boolean = false): Option[List[Range]] = {
+      var eqs = Linear.equations(pred)
+
+      // compute transitive equations by eliminating one variable at a time
+      if (transitive) 
+        eqs = eqs ::: {
+          for (v <- p;
+            e1 <- eqs if e1.proj(v) > 0;
+            e2 <- eqs if e2.proj(v) < 0) yield 
+            e1 * e2.proj(v) * (-1) + e2 * e1.proj(v)         
+          }
+      
 
       // free variables (allowed to appear in result range)
-      var done = Vars(pred) -- p
+      var free = Vars(pred) -- p
       
       var out: List[Range] = Nil
       for (v <- p) {       
-        // use previous variables in generating subsequent range bound
-        done = done + v
-
-        // find constraints only contains "done" vars and having "v"
-        val bounds = eqs.filter { case eq => eq.has(v) && eq.vars.subsetOf(done) }
+        // find constraints only contains "free" vars and having "v"
+        val bounds = eqs.filter { case eq => eq.has(v) && eq.vars.subsetOf(free + v) }
       
         // upper and lower bound expressions
         val lower = bounds.filter(_.proj(v) > 0).map { 
@@ -262,6 +270,10 @@ from numpy import *
 
         if (lower.size == 0 || upper.size == 0)
           return None
+
+        // use previous variables in generating subsequent range bound
+        if (use)
+          free = free + v
 
         out = Range(MAX(lower, pred), MIN(upper, pred)) :: out
       }
@@ -297,4 +309,10 @@ from numpy import *
       ???
     }
   }
+
+  // Specifies read/write ranges 
+  // (reads are applications of arguments under path conditions for given x in DOM)
+  // (writes are bounds on DOM)
+  // In particular, we can write into tables used in read as long as it's same x
+  class MemorySpec(a: Algorithm, write: List[Range], read: List[App])
 }
