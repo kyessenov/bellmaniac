@@ -16,6 +16,8 @@ from numpy import *
   private def print(l: List[Expr]): String = l.map(print(_)).mkString(", ")  
   private def indent(tabs: Int = dom+1) = (1 to tabs).map(_ => "  ").mkString("")
 
+  import Transform.{transform, visit}
+  
   // create T value
   val T = Var("T", dom)
 
@@ -33,22 +35,11 @@ from numpy import *
     case App(v: Var, args) => 
       if (inputs.exists(_.v == v) || scope.args.contains(v)) 
         print(v) + "[" + print(args) + "]"
-      else if (algorithms.exists(_.v == v)) { 
-        if (scope.v == v && args.drop(dom) == scope.args.drop(dom))
-          "T[" + print(args.take(dom) zip offv map { case (a, o) => a + o }) + "]"
-        else {
-          val offsets = (args.take(dom) zip scope.args.take(dom)).map {
-            case (actual, formal) => Linear(formal - actual) }.flatten
-          if (offsets.size == dom) 
-            v.name + "(" + print(T :: (offv zip offsets).map {
-              case (a, o) => a + o.expr } ::: args.drop(dom)) + ")"
-          else {
-            println("unexpected call to " + v)
-            "??"
-          }
-        }
-      } else { 
-        error("unknown var: " + v)
+      // used for self-recursion (must preserver non-dom arguments)
+      else if (scope.v == v && args.drop(dom) == scope.args.drop(dom))
+        "T[" + print(args.take(dom) zip offv map { case (a, o) => a + o }) + "]"            
+      else { 
+        error("should be unreachable app: " + v + " in " + scope.v)
         ???
       }
     case _: OpVar =>
@@ -62,24 +53,47 @@ from numpy import *
     case _ => super.print(e)
   }
 
-  def stmts(e: Expr): (List[String], String) = {
-    var tables: List[(Var, App)] = Nil
-    val e1 = Transform.transform(e) {
-      case OpVar(v, args, exprs) => 
-        assert(exprs.startsWith(args), "must be offsettified")
-        assert(args.size == dom, "must match dom")
-        val T1 = T.fresh
-        tables = (T1, App(v, exprs)) :: tables
-        T1
+  // Write to T at offset off by invoking v with rest
+  case class Write(v: Var, T: Var, off: List[Expr], rest: List[Expr]) {
+    assert (v.arity == off.size + rest.size, "must match arity")
+    assert (off.size == dom && T.arity == dom)
+    override def toString = v.name + "("  + print(T :: off ::: rest) + ")" 
+  }
+
+  object Write {
+    // top-level write
+    def make(app: App): List[Write] =
+      make(app, T, offv, scope.args.take(dom))
+
+    // offv is offsets for T
+    // outputs list of write with last corresponding to this "app"
+    def make(app: App, T: Var, offv: List[Expr], formal: List[Var]): List[Write] = app match {
+      case App(v: Var, args) =>
+        val offsets = (args.take(dom) zip formal).map {
+          case (actual, formal) => Linear(formal - actual) 
+        }.flatten        
+       
+        var out: List[Write] = Nil 
+
+        // recurse on dependency OpVars
+        val rest = for (arg <- args.drop(dom)) yield transform(arg) {
+          case OpVar(v, args, exprs) =>
+            assert(v.isInstanceOf[Var], "must be flattened")
+            assert(exprs.startsWith(args), "must be fully linearized")
+            assert(args.size == dom, "must match dom")            
+            val T1 = T.fresh
+            // todo: extract offsets from the opvar
+            out = out ::: make(App(v, exprs), T1, List.fill(dom)(Const(0)), args) 
+            T1
+        }
+        
+        if (offsets.size == dom) 
+          out ::: Write(v, T, (offv zip offsets).map { case (a, o) => a + o.expr }, rest) :: Nil
+        else {
+          error("cannot resolve offsets: " + app)
+          Nil
+        }
     }
-    tables = tables.reverse
-    ({for ((t, App(v: Var, exprs)) <- tables;
-         (stmts1, exprs1) = exprs.drop(dom).map(stmts(_)) unzip)
-      yield stmts1.flatten :::
-      t.name + " = " + v.name + "_alloc(" + exprs1.mkString(", ") + ")" ::
-      v.name + "(" + print(t :: (1 to dom).map(_ => Const(0)).toList) + ", " + 
-        exprs1.mkString(", ") + ")" :: Nil
-    }.flatten, print(e1))
   }
 
   override def print(c: Computation) = c match {
@@ -94,24 +108,27 @@ from numpy import *
     case a @ Algorithm(v, args, pre, e) =>        
       this.scope = a
       this.offv = args.take(dom).map { case Var(n, i) => Var("o" + n, i) }
-      val loop = new LoopConstruct(a, dom)
+      val loop = new LoopConstruct(a)
 
       // memory allocation function
       "def " + v.name +"_alloc(" + print(args.drop(dom)) + "):\n" + 
+      "  return " + new MemorySpec(a).alloc + "\n" +      
       // detect if it's a split and act appropriately
       "def " + v.name + "(" + print(T :: offv ::: args.drop(dom)) + "):\n" + {
         e match {
           case Cond(cases, Havoc) if cases.forall(_._2.isInstanceOf[App]) =>
             cases match {
               case (minp, mine) :: splits =>
-                // double check that splits are coming the tactic
+                // double check that splits are coming from the tactic
                 val (preds, es) = splits.unzip
                 for (p1 <- preds; p2 <- preds; if p1 != p2)
                   assert(SMT.prove((pre and p1) implies (! p2)))
 
-                "  if " + print(minp) + ":\n    " + print(mine) + "\n    return\n" +                 
-                "  " + (for (e <- es; (pre, e1) = stmts(e))
-                  yield pre ::: e1 :: Nil).flatten.mkString("\n  ")
+                
+                "  if " + print(minp) + ":\n    " + 
+                (for (w <- Write.make(mine.asInstanceOf[App])) yield w.toString).mkString("\n  ") + 
+                "\n    return\n" +                 
+                "  " + (for (e <- es; w <- Write.make(e.asInstanceOf[App])) yield w.toString).mkString("\n  ")
               case _ => ???
             }
 
@@ -159,12 +176,10 @@ from numpy import *
 
   case class Vector(path: Pred, v: Var, c: List[Expr])
 
-  class LoopConstruct(a: Algorithm, dim: Int) extends Logger {
-    assert (dim > 0)
-    import Transform._
-
+  
+  class LoopConstruct(a: Algorithm) extends Logger {
     val pre = a.pre
-    val c = a.args.take(dim)
+    val c = a.args.take(dom)
     
     // find all recursion references
     def vectors = {
@@ -172,7 +187,7 @@ from numpy import *
       transform(a) {
         case (path, locals, App(v, vargs)) =>
           if (v == a.v)
-            out = Vector(path, a.v, vargs.take(dim)) :: out
+            out = Vector(path, a.v, vargs.take(dom)) :: out
           else if (! locals.contains(v) && ! inputs.exists(_.v == v))
             error("unexpected: " + v + " in " + a.v)
           Havoc
@@ -186,7 +201,7 @@ from numpy import *
     
     // find domination order orientation
     def orient(vs: List[Vector]): Rotation = {
-      for (r <- Rotation.all(dim))
+      for (r <- Rotation.all(dom))
         if (vs.forall { case Vector(p, _, v) => SMT.prove(p implies LE(r(v), r(c))) })
           return r
       error("can't orient in domination order")
@@ -271,7 +286,7 @@ from numpy import *
     }
 
 
-    // generate looping construct for first "dim" parameters of "a"
+    // generate looping construct for first "dom" parameters of "a"
     // returns (list of iteration variables, list of their ranges, assignment to actual variables)
     def generate: (List[Var], List[Range], List[Expr]) = {
       // orient dependency vectors by flipping +/- coordinates so that they point
@@ -304,10 +319,8 @@ from numpy import *
   // (writes are bounds on DOM)
   // In particular, we can write into tables used in read as long as it's same x
   class MemorySpec(a: Algorithm) {
-    val loop = new LoopConstruct(a, dom)
-    
     // table dimensions (range from 0 to Expr)
-    val write: List[Expr] = loop.inferBounds(a.args.take(dom), a.pre, false, true) match {
+    def write: List[Expr] = new LoopConstruct(a).inferBounds(a.args.take(dom), a.pre, false, true) match {
       case Some(ranges) =>
         for (Range(l, h) <- ranges) yield {
           if (! SMT.prove(a.pre implies l >= Const(0)))
@@ -321,8 +334,16 @@ from numpy import *
 
     def alloc = "zeros((" + print(write) + "), int)"
     
-    val read: List[Vector] = {
-      val out: List[Vector] = Nil
+    def read: List[Vector] = {
+      var out: List[Vector] = Nil      
+      transform(a) {
+        case (path, _, App(v: Var, vargs)) if a.args.contains(v) && v.arity == dom =>
+          out = Vector(path, v, vargs) :: out
+          Havoc
+        case (_, _, v) if a.args.contains(v) && v.arity == dom =>
+          error("unexpected pass of an argument function")
+          Havoc
+      }
       out
     }
   }

@@ -92,6 +92,7 @@ object Linear {
     }
  
   // extract offsets from expressions if possible
+  // reverses shift/lift operation, e.g. adding a fixed offset and more parameters
   def offsets(op: OpVar): Option[(Funct, List[Expr])] = op.flatten match {
     case OpVar(v: Var, args, exprs) if args.size <= exprs.size =>
       val k = args.size

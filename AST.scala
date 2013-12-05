@@ -1097,7 +1097,7 @@ trait Lowering extends Environment {
   // Resulting set contains "main" and concretized algorithms together with specs
   // when necessary
   def refineAll(): List[Algorithm] = {
-    var out: List[Algorithm] = Nil
+    var keep: List[Algorithm] = Nil
 
     def concretizeAll(path: Pred, s: List[Var], e: Expr)
     (implicit l: Algorithm): Expr = { 
@@ -1106,9 +1106,9 @@ trait Lowering extends Environment {
           if vargs == l.args && refines.exists {  
             case (a1, _, a2) => a1.v == v && a2 == l } =>
           // handle split specially
-          assert(! out.exists(_.v == v))
-          out = algorithms.find(_.v == v).get :: out
-          println("keeping " + v)
+          assert(! keep.exists(_.v == v))
+          keep = algorithms.find(_.v == v).get :: keep
+          message("keeping " + v + " in " + l.v)
           app          
         case (path, s, v: Var) => 
           if (s.contains(v) || inputs.exists(_.v == v) || leaves.exists(_.v == v)) 
@@ -1127,37 +1127,24 @@ trait Lowering extends Environment {
     val concretized = for (l @ Algorithm(v, args, pre, e) <- leaves)  
       yield Algorithm(v, args, pre, flatten(concretizeAll(pre, args, e)(l)))
 
-    out = concretized ::: out
+    val out = concretized ::: keep
          
     // copy all metrics but all at same generation
     val p = new Proof { override val CHECK_PRE = false }
     p.inputs = this.inputs
     p.algorithms = out
-    // compute descendants
-    def level(a: Algorithm): Int = {
-      var visited = a :: Nil      
-      def helper(a: Algorithm) {
-        for (v <- Vars(a.expr);
-           b <- out if b.v == v && ! visited.contains(b)) {
-           visited = b :: visited
-           helper(b)
-         }
-       }
-      helper(a)
-      visited.size 
-    }
     p.metrics = 
       for (a <- out; (b, m) <- metrics if b.v == a.v)
-        yield (a, p.Metric(level(a),m.e))
+        yield (a, p.Metric(0,m.e))
     
     // p.showCallGraph
     
-    for (a <- out) {
-      print(a.v + " ")
-      // TODO: can disable validation for now
-      // p.validate(a)  
-    }
-    println("checked termination")
+    // TODO: can disable termination validation for now
+    //for (a <- out) {
+    //  print(a.v + " ")
+    //   p.validate(a)  
+    //}
+    //println("checked termination")
 
     out
   }
