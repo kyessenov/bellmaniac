@@ -54,26 +54,81 @@ from numpy import *
   }
 
   // Write to T at offset off by invoking v with rest
-  case class Write(v: Var, T: Var, off: List[Expr], rest: List[Expr]) {
+  case class Write(v: Var, T: Var, off: List[Expr], rest: List[Expr], deps: List[Write]) {
     assert (v.arity == off.size + rest.size, "must match arity")
     assert (off.size == dom && T.arity == dom)
-    override def toString = v.name + "("  + print(T :: off ::: rest) + ")" 
-  }
+
+    override def toString = v.name + "("  + print(T :: off ::: rest) + ")"
+
+    def all: List[Write] =
+      deps.flatMap(_.all) ::: this :: Nil
+
+    def stmts: List[String] = all.map(_.toString)
+
+    def same(that: Write): Boolean =
+      this.v == that.v &&
+      (this.rest zip that.rest).forall {
+        case (e1, e2) =>
+          e1 == e2 ||
+          ((this.deps.find(_.T == e1), that.deps.find(_.T == e2)) match {
+            case (Some(w1), Some(w2)) if w1.off == w2.off =>
+              w1.same(w2)              
+            case _ => false
+          })
+      }
+
+    def replace(implicit that: Write): Write = {
+      deps.find { case w => w.same(that) } match {
+        case Some(w) => // replace and repeat
+          // offset corrections 
+          val offsets = that.off zip w.off map Minus.tupled;
+          
+          copy(deps = deps.filter(_ != w),
+                rest = transform(App(v, off ::: rest)) {
+                  // w.T must appear as a parameter in App
+                  case App(v, args) if args.contains(w.T) => 
+                    // add offsets according to position of w.T
+                    val a = algorithms.find(_.v == v).get
+                    // find additions
+                    var add: Map[Var, Expr] = Map()
+                    for ((formal, actual) <- a.args zip args;
+                         if actual == w.T;
+                         (o, i) <- offsets.zipWithIndex)
+                       add = add + (Var(formal.name + "_" + i) -> o)
+                    // add them
+                    App(v, for ((formal, actual) <- a.args zip args) yield {
+                        if (actual == w.T)
+                          that.T
+                        else if (add.contains(formal))
+                          Linear.make(actual + add(formal)).expr
+                        else 
+                          actual
+                    })                            
+                } match {
+                  case App(_, args) => args.drop(dom)
+                  case _ => ???
+                }
+          ).replace
+        case None => // recurse
+          copy(deps = deps.map(_.replace))
+      }
+    }
+ }
 
   object Write {
     // top-level write
-    def make(app: App): List[Write] =
+    def make(app: App): Write =
       make(app, T, offv, scope.args.take(dom))
 
     // offv is offsets for T
     // outputs list of write with last corresponding to this "app"
-    def make(app: App, T: Var, offv: List[Expr], formal: List[Var]): List[Write] = app match {
+    def make(app: App, T: Var, offv: List[Expr], formal: List[Var]): Write = app match {
       case App(v: Var, args) =>
         val offsets = (args.take(dom) zip formal).map {
           case (actual, formal) => Linear(formal - actual) 
         }.flatten        
        
-        var out: List[Write] = Nil 
+        var deps: List[Write] = Nil 
 
         // recurse on dependency OpVars
         val rest = for (arg <- args.drop(dom)) yield transform(arg) {
@@ -83,17 +138,59 @@ from numpy import *
             assert(args.size == dom, "must match dom")            
             val T1 = T.fresh
             // todo: extract offsets from the opvar
-            out = out ::: make(App(v, exprs), T1, List.fill(dom)(Const(0)), args) 
+            deps = make(App(v, exprs), T1, List.fill(dom)(Const(0)), args) :: deps
             T1
         }
         
         if (offsets.size == dom) 
-          out ::: Write(v, T, (offv zip offsets).map { case (a, o) => a + o.expr }, rest) :: Nil
+          Write(v, T, (offv zip offsets).map { case (a, o) => a + o.expr }, rest, deps.reverse) 
         else {
           error("cannot resolve offsets: " + app)
-          Nil
+          ???
         }
     }
+  }
+
+ 
+  
+  // use partitions in other partitions writes
+  def reuse(writes: List[Write]) = {
+    var deps: List[(Int, Int)] = Nil
+
+    def replaceAll(writes: List[Write]) = 
+      for ((w1,i) <- writes.zipWithIndex) yield {
+        var out = w1
+        for ((w2,j) <- writes.zipWithIndex if i != j) {          
+          val next = out.replace(w2)
+          if (out != next) {        
+            out = next
+            deps = (j, i) :: deps
+          }
+        }
+        out            
+      }
+
+    var result: List[Write] = writes
+    var prev: List[Write] = Nil
+    while (result != prev) {
+      prev = result
+      result = replaceAll(result)
+    }
+
+    // permute according to deps
+    def order(g: List[Int]): List[Int] = g match {
+      case Nil => Nil
+      case _ =>
+        // find node without incoming edges
+        g.find { case i => ! deps.exists(_._2 == i) } match {
+          case Some(i) => 
+            deps = deps.filter(_._1 != i)
+            i :: order(g.filter(_ != i))
+          case _ => error("loop detected"); ???
+        }
+    }    
+
+    order(0 to (writes.size - 1) toList).map(result(_))
   }
 
   override def print(c: Computation) = c match {
@@ -110,25 +207,33 @@ from numpy import *
       this.offv = args.take(dom).map { case Var(n, i) => Var("o" + n, i) }
       val loop = new LoopConstruct(a)
 
-      // memory allocation function
-      "def " + v.name +"_alloc(" + print(args.drop(dom)) + "):\n" + 
-      "  return " + new MemorySpec(a).alloc + "\n" +      
       // detect if it's a split and act appropriately
       "def " + v.name + "(" + print(T :: offv ::: args.drop(dom)) + "):\n" + {
         e match {
           case Cond(cases, Havoc) if cases.forall(_._2.isInstanceOf[App]) =>
             cases match {
-              case (minp, mine) :: splits =>
-                // double check that splits are coming from the tactic
+              case (minp, mine: App) :: splits =>
                 val (preds, es) = splits.unzip
+                val apps = es.map {
+                  case app: App => app
+                  case _ => error("expected an app here"); ???
+                }
+                // double check that splits are coming from the tactic
                 for (p1 <- preds; p2 <- preds; if p1 != p2)
                   assert(SMT.prove((pre and p1) implies (! p2)))
 
+                val writes = reuse(apps.map(Write.make(_)))
                 
                 "  if " + print(minp) + ":\n    " + 
-                (for (w <- Write.make(mine.asInstanceOf[App])) yield w.toString).mkString("\n  ") + 
-                "\n    return\n" +                 
-                "  " + (for (e <- es; w <- Write.make(e.asInstanceOf[App])) yield w.toString).mkString("\n  ")
+                Write.make(mine).stmts.mkString("\n    ") + 
+                "\n    return\n  " + {
+                  (for (w1 <- writes;
+                        w <- w1.all if w.T != T;
+                        a <- algorithms if a.v == w.v)
+                    yield print(w.T) + " = " + new MemorySpec(a).alloc) :::
+                  (for (w <- writes; stmt <- "# partition" :: w.stmts)
+                    yield stmt)
+              }.mkString("\n  ")
               case _ => ???
             }
 
