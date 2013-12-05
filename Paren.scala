@@ -75,7 +75,8 @@ object Parenthesis {
     val d = Var("d0", 7)
     val D = Algorithm(d, List(i, j, n, w, r, s, t), 0 <= i and i < n/2 and 0 <= j and j < n/2,
       Op(Reduce(s(i, k) + t(k, j) + w(i, k, j) where k in Range(0, n/2)), r(i, j)))
-    add(D, 0)
+    // important to have n
+    add(D, n)
      
     val bij = b0.capture(2) 
 

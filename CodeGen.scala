@@ -97,18 +97,7 @@ from numpy import *
       val loop = new LoopConstruct(a, dom)
 
       // memory allocation function
-      "def " + v.name +"_alloc(" + print(args.drop(dom)) + "):\n" + {
-        loop.inferBounds(args.take(dom), pre, false, true) match {
-          case Some(ranges) =>
-            for (Range(l, h) <- ranges)
-              if (! SMT.prove(pre implies l >= Const(0)))
-                error("can't allocate memory with possibly negative index")
-              "  return zeros((" + print(ranges.map(_.h)) + "), int)\n"
-          case None => 
-            error("can't infer memory allocation bounds: " + pre)
-            "  # can't compute bounds\n"
-        }
-      } + 
+      "def " + v.name +"_alloc(" + print(args.drop(dom)) + "):\n" + 
       // detect if it's a split and act appropriately
       "def " + v.name + "(" + print(T :: offv ::: args.drop(dom)) + "):\n" + {
         e match {
@@ -168,7 +157,7 @@ from numpy import *
         (all(d-1) map { case Rotation(flips) => Rotation(true :: flips) })
   }
 
-  case class Vector(path: Pred, c: List[Expr])
+  case class Vector(path: Pred, v: Var, c: List[Expr])
 
   class LoopConstruct(a: Algorithm, dim: Int) extends Logger {
     assert (dim > 0)
@@ -183,7 +172,7 @@ from numpy import *
       transform(a) {
         case (path, locals, App(v, vargs)) =>
           if (v == a.v)
-            out = Vector(path, vargs.take(dim)) :: out
+            out = Vector(path, a.v, vargs.take(dim)) :: out
           else if (! locals.contains(v) && ! inputs.exists(_.v == v))
             error("unexpected: " + v + " in " + a.v)
           Havoc
@@ -198,7 +187,7 @@ from numpy import *
     // find domination order orientation
     def orient(vs: List[Vector]): Rotation = {
       for (r <- Rotation.all(dim))
-        if (vs.forall { case Vector(p, v) => SMT.prove(p implies LE(r(v), r(c))) })
+        if (vs.forall { case Vector(p, _, v) => SMT.prove(p implies LE(r(v), r(c))) })
           return r
       error("can't orient in domination order")
       ???
@@ -314,5 +303,27 @@ from numpy import *
   // (reads are applications of arguments under path conditions for given x in DOM)
   // (writes are bounds on DOM)
   // In particular, we can write into tables used in read as long as it's same x
-  class MemorySpec(a: Algorithm, write: List[Range], read: List[App])
+  class MemorySpec(a: Algorithm) {
+    val loop = new LoopConstruct(a, dom)
+    
+    // table dimensions (range from 0 to Expr)
+    val write: List[Expr] = loop.inferBounds(a.args.take(dom), a.pre, false, true) match {
+      case Some(ranges) =>
+        for (Range(l, h) <- ranges) yield {
+          if (! SMT.prove(a.pre implies l >= Const(0)))
+            error("can't allocate memory with possibly negative index")
+          h
+        }
+      case None => 
+        error("can't infer memory allocation bounds")
+        ???
+    }
+
+    def alloc = "zeros((" + print(write) + "), int)"
+    
+    val read: List[Vector] = {
+      val out: List[Vector] = Nil
+      out
+    }
+  }
 }

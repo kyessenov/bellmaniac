@@ -13,10 +13,11 @@ trait Logger {
   def error(s: => String) = { 
     val elts = Thread.currentThread().getStackTrace()
     var caller = elts(3)
-    message("*** Error occurred in " + caller.getMethodName + " at " + caller.getLineNumber)
-    message(s)
+    message("Error occurred in " + caller.getMethodName + " at " + caller.getLineNumber)
+    println(s)
+    message("End of error message")
     if (STRICT)
-      throw new RuntimeException
+      System.exit(-1)
   }
   
   def print(s: => Any) = Console.out.print(s.toString)

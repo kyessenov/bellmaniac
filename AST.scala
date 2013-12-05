@@ -543,31 +543,37 @@ object Transform {
     override def apply(path: Pred, stack: List[Var], s: Seq) = f.lift(path, stack, s)
   }
 
-  def transform(a: Algorithm, f: Transformer): Expr = 
-    visit(flatten(a.expr))(a.pre, a.args, f)
-
   def transform(a: Algorithm)(f: PartialFunction[(Pred, List[Var], Expr), Expr]): Expr = 
     transform(a, exprTransformer(f))
 
+  def transform(a: Algorithm, f: Transformer): Expr = 
+    visit(flatten(a.expr))(a.pre, a.args, f)
+  
   def transform(e: Expr)(f: PartialFunction[Term, Term]): Expr = 
-    visit(e)(True, Nil, transformer(f))
+    transform(e, transformer(f))
+
+  def transform(e: Expr, f: Transformer): Expr = 
+    visit(e)(True, Nil, f)
 
   def transform(p: Pred)(f: PartialFunction[Term, Term]): Pred = 
-    visit(p)(True, Nil, transformer(f))
+    transform(p, transformer(f))
+
+  def transform(p: Pred, f: Transformer): Pred = 
+    visit(p)(True, Nil, f)
   
   def transform(s: Seq)(f: PartialFunction[Term, Term]): Seq = 
-    visit(s)(True, Nil, transformer(f))
+    transform(s, transformer(f))
 
-  def substitute(e: Expr, f: Map[Var, Expr]): Expr = 
-    transform(e) {
-      case v: Var if f.contains(v) => f(v)
-    }
+  def transform(s: Seq, f: Transformer): Seq = 
+    visit(s)(True, Nil, f)
 
-  def substitute(p: Pred, f: Map[Var, Expr]): Pred =
-    transform(p) {
-      case v: Var if f.contains(v) => f(v)
-    }    
+  def substitution(f: Map[Var, Expr]) = exprTransformer {
+    case (_, s, v: Var) if f.contains(v) && ! s.contains(v) => f(v) 
+  }
 
+  def substitute(e: Expr, f: Map[Var, Expr]): Expr = transform(e, substitution(f))
+
+  def substitute(p: Pred, f: Map[Var, Expr]): Pred = transform(p, substitution(f))
 
   def flatten(e: Expr): Expr = transform(e) {
     case a: App => a.flatten match {
@@ -603,23 +609,18 @@ trait Environment extends Logger {
   }
 
   // Check for soundness of an algorithm before adding to environment
-  def validate(a: Algorithm): Boolean = true
+  def validate(a: Algorithm)
   
   // Add an algorithm together with termination metric
   // Metric must decrease with each recursive call, must be non-negative
-  def add(alg: Algorithm, metric: Expr) =
-    algorithms.find(_.v == alg.v) match {
-      case Some(alg0) if alg != alg0 =>
-        error("conflicting algorithms: " + alg + " and " + alg0)
+  def add(a: Algorithm, m: Expr) =
+    algorithms.find(_.v == a.v) match {
+      case Some(a0) if a != a0 =>
+        error("conflicting algorithms:\n " + a + "\n" + a0)
       case None =>
-        algorithms = alg :: algorithms
-        metrics = (alg, Metric(metrics.size, metric)) :: metrics
-        
-        if (! validate(alg)) 
-          error("trying to add non-welldefined algorithm: " + alg)                 
-
-        if (! SMT.prove(alg.pre implies metric >= Const(0)))
-          error("can't prove base termination for: " + alg)
+        algorithms = a :: algorithms
+        metrics = (a, Metric(metrics.size, m)) :: metrics        
+        validate(a)
       case _ =>
     }
 
@@ -638,36 +639,34 @@ trait Environment extends Logger {
     return None
   }
 
-  def metric(a: Computation) = metrics.find(_._1 == a) match {
-    case Some((a, m)) => m
+  def metric(c: Computation) = metrics.find(_._1 == c) match {
+    case Some((_, m)) => m
     case _ => Metric.DEFAULT
   }
   
   // Induction metric: version, expression (that must be >= 0)
-  case class Metric(g: Int, e: Expr) {    
-    def mayCall(path: Pred, app: App): Boolean = app.flatten match {
-      case App(v: Var, args) => algorithms.find(_.v == v) match {
-        case Some(a) => 
-          val that = metric(a)
-          
-          if (that.g > this.g) {
-            // "calling higher generation " + app
-            false
-          } else if (this.g == that.g && 
-                     ! SMT.prove(path implies that.e.s(a.args zip args) < this.e)) {
-            // "can't prove termination step " + app
-            false
-          } else
-            true
-        case None =>
-          true
-      }
-      case _ => ???
-    }
-  }
-
+  case class Metric(g: Int, e: Expr) {          
+    def mayCall(path: Pred, that: Metric): Boolean =       
+      if (that.g > this.g) 
+        false
+      else if (this.g == that.g && 
+              ! SMT.prove(path implies that.e < this.e)) 
+        false
+      else
+        true
+  }  
+  
   object Metric {
     val DEFAULT = Metric(0, Const(0))
+    def apply(app: App): Metric = app.flatten match {
+      case App(v: Var, args) => algorithms.find(_.v == v) match {
+        case Some(a) => metric(a) match {
+          case Metric(g, e) => Metric(g, e.s(a.args zip args))
+        }
+        case None => DEFAULT
+      }
+      case _ => ???
+    }      
   }
 
   type Refinement = Algorithm => Algorithm
@@ -676,12 +675,12 @@ trait Environment extends Logger {
   def step0(f: Algorithm => (Algorithm, Funct, Expr)): Refinement = { 
     (in: Algorithm) => {    
       val (out, stp, expr) = f(in)
-      message(in.v + " refined to " + out.v + " metric " + expr)
         
       // add default metric if the algorithm is not in the environment
-      add(in, Metric.DEFAULT.e)
-      refines = (in, stp, out) :: refines
+      add(in, metric(in).e)
       add(out, expr)
+      refines = (in, stp, out) :: refines
+      println(in.v + " refined to " + out.v)
 
       out
     }
@@ -700,75 +699,114 @@ trait Environment extends Logger {
       restricts.map(s => (s._1, "?split", s._2))
     }
   }
+
+  def showCallGraph() {
+    GraphViz.display {
+      for (a <- algorithms;
+           v <- Vars(a.expr);
+           b <- algorithms if b.v == v)
+         yield (a.v.name, "", b.v.name)
+    }
+  }
+
+  override def toString = 
+    "algorithms: " + algorithms.map(_.v).mkString(", ") + "\n" +
+    "inputs: " + inputs.map(_.v).mkString(", ") + "\n" +
+    "metrics: " + metrics.map { case (a, m) => a.v + ":" + m }.mkString(", ")
 }
 
 // Refinement steps
-class Proof(
-  // check well definedness at every step
-  CHECK_WD: Boolean = true,
-  // maximum number of unfoldings in the well definedness check
-  WD_UNFOLD: Int = 4) 
-extends Environment with Lowering {
+class Proof extends Environment with Lowering {
   import Transform._
 
   def $ = Var.fresh().name 
-  def $$ = new Proof(CHECK_WD = false)
+  def $$ = new Proof { override def validate(a: Algorithm) {} }
 
-  // Identity
-  def id: Refinement = identity[Algorithm]
-
-  // Check well definedness 
-  // unfold algorithm finite amount of times to apply OpVars from argument lists
-  // TODO: be smarter about unfoldings
   case class PreFailure(t: Term) extends RuntimeException  
-  object NonTermination extends RuntimeException
+  case class NonTermination(s: String) extends RuntimeException
 
-  override def validate(a: Algorithm) = 
-    if (CHECK_WD) 
-      welldefined(a, metric(a))
-    else
-      true
-
-  def welldefined(a: Algorithm, m: Metric): Boolean =  
+  override def validate(a: Algorithm) {
+    welldefined(a, metric(a), true)
+  }
+      
+  def welldefined(a: Algorithm, m: Metric, err: Boolean = false): Boolean = { 
     try {
-      welldefined(flatten(a.expr), a.pre, a.args)(0, Set(), m)      
+      welldefined(flatten(a.expr), a.pre, a.args)(0, Set(), m)     
+      if (! SMT.prove(a.pre implies m.e >= Const(0)))
+        throw NonTermination("can't prove base termination: " + a)
       true
     } catch {
-      case PreFailure(t) => false        
-      case NonTermination => false
+      case PreFailure(t) => 
+        if (err) error("pre-condition violation at " + t + " in " + a.v)
+        false
+      case NonTermination(s) => 
+        if (err) error(s + " in " + a.v)
+        false
     }
-  
-  private def welldefined(e: Expr, path: Pred, locals: List[Var])
-    (implicit unfolded: Int, cache: Set[List[Funct]], m: Metric) {
-    visit(e)(path, locals, exprTransformer {
-      case (path, locals, app @ App(v: Var, vargs)) if ! locals.contains(v) && ! inputs.exists(_.v == v) =>
+  }
+
+  // maximum number of unfoldings in the well definedness check
+  val MAX_UNFOLD = 5
+  val CHECK_PRE = true
+  val CHECK_TERMINATION = true
+
+  // TODO: we can actually infer conditions on parameters to input functions and then check
+  // pre-conditions for those
+  // Algorithm: given metric, find all Apps; 
+  // 1) check metric decreasing 2) find specs on parameter applications 
+  // 3) recurse on applying to those parameters
+  // We might have to walk up refinement chain to avoid solving fixed-point equations on 
+  // calls to other algorithms
+
+  // unfold only applications containing OpVars
+  private def mustUnfold(e: Expr): Boolean = {
+    transform(e) { case _: OpVar => return true }
+    return false
+  }
+
+  // Rename 0-arity Vars consistently
+  // Assume visiting order is unique
+  private def structure(e: Expr): Expr = {
+    var i = 0
+    transform(e) { case v: Var if v.arity == 0 => i = i + 1; Var("$" + i) }    
+  }
+    
+  private def welldefined(e: Expr, path: Pred, s: List[Var])
+    (implicit unfolded: Int, cache: Set[Expr], m: Metric) {
+    visit(e)(path, s, exprTransformer {
+      case (path, s, app @ App(v: Var, vargs)) =>
+        if (! s.contains(v) && ! inputs.exists(_.v == v)) {
           algorithms.find(_.v == v) match {
             case Some(a) =>             
               // check for pre-condition
-              if (! SMT.prove(path implies a.pre.s(a.args zip vargs))) 
+              if (CHECK_PRE && ! SMT.prove(path implies a.pre.s(a.args zip vargs))) 
                 throw PreFailure(app)
             
               // check for termination
-              if (! m.mayCall(path, app))
-                throw NonTermination
+              val m2 = Metric(app)
+              if (CHECK_TERMINATION && ! m.mayCall(path, m2))
+                throw NonTermination(s"non-decreasing metric at $app of $m2 from $m")
 
               // unfold to reach OpVars
-              val sig = v :: (vargs.collect { case op: OpVar => op: Funct })
-              if (unfolded < WD_UNFOLD && ! cache.contains(sig)) {
-                //println("unfolding " + a.v + " at level " + unfolded)
-                welldefined(flatten(a.expr.s(a.args zip vargs)), path, locals)(
-                  unfolded + 1, cache + sig, m)
+              val sapp = structure(app)
+              if (unfolded < MAX_UNFOLD && ! cache.contains(sapp) && mustUnfold(app)) {
+                welldefined(flatten(a.expr.s(a.args zip vargs)), path, s)(
+                  unfolded + 1, cache + sapp, m)              
               }
             case _ => 
               error("unknown var: " + v)
           } 
+        }
 
         for (arg <- vargs) 
-          welldefined(arg, path, locals)
+          welldefined(arg, path, s)
         
         Havoc
     })    
   }
+
+  // Identity
+  def id: Refinement = identity[Algorithm]
 
   // Substitute the body of an algorithm
   def manual(name: String, body: Expr, hint: Refinement = id) = step {
@@ -1059,33 +1097,69 @@ trait Lowering extends Environment {
   // Resulting set contains "main" and concretized algorithms together with specs
   // when necessary
   def refineAll(): List[Algorithm] = {
-    var keep: List[Algorithm] = Nil
+    var out: List[Algorithm] = Nil
 
-    def concretizeAll(path: Pred, s: List[Var], e: Expr)(implicit ctx: Algorithm): Expr = { 
+    def concretizeAll(path: Pred, s: List[Var], e: Expr)
+    (implicit l: Algorithm): Expr = { 
       visit(e)(path, s, exprTransformer {
+        case (_, _, app @ App(v: Var, vargs)) 
+          if vargs == l.args && refines.exists {  
+            case (a1, _, a2) => a1.v == v && a2 == l } =>
+          // handle split specially
+          assert(! out.exists(_.v == v))
+          out = algorithms.find(_.v == v).get :: out
+          println("keeping " + v)
+          app          
         case (path, s, v: Var) => 
           if (s.contains(v) || inputs.exists(_.v == v) || leaves.exists(_.v == v)) 
             v
           else leaves.find { a => concretize(v, a.v).isDefined } match {
             case Some(a) => 
-              if (a == ctx) {
-                message("WARNING: keeping " + v + " in " + ctx.v)
-                keep = algorithms.find(_.v == v).get :: keep
-                v
-              } else
-                concretizeAll(path, s, concretize(v, a.v).get)
+              concretizeAll(path, s, concretize(v, a.v).get)
             case None => 
               error("can't locate leaf for " + v)
               v
           }          
       })
     }
-
   
     // modify bodies to refer only to leaves
-    val out = for (leaf @ Algorithm(v, args, pre, e) <- leaves)  
-      yield Algorithm(v, args, pre, flatten(concretizeAll(pre, args, e)(leaf))) 
-    out ::: keep
+    val concretized = for (l @ Algorithm(v, args, pre, e) <- leaves)  
+      yield Algorithm(v, args, pre, flatten(concretizeAll(pre, args, e)(l)))
+
+    out = concretized ::: out
+         
+    // copy all metrics but all at same generation
+    val p = new Proof { override val CHECK_PRE = false }
+    p.inputs = this.inputs
+    p.algorithms = out
+    // compute descendants
+    def level(a: Algorithm): Int = {
+      var visited = a :: Nil      
+      def helper(a: Algorithm) {
+        for (v <- Vars(a.expr);
+           b <- out if b.v == v && ! visited.contains(b)) {
+           visited = b :: visited
+           helper(b)
+         }
+       }
+      helper(a)
+      visited.size 
+    }
+    p.metrics = 
+      for (a <- out; (b, m) <- metrics if b.v == a.v)
+        yield (a, p.Metric(level(a),m.e))
+    
+    // p.showCallGraph
+    
+    for (a <- out) {
+      print(a.v + " ")
+      // TODO: can disable validation for now
+      // p.validate(a)  
+    }
+    println("checked termination")
+
+    out
   }
 
   // Inline algorithms of the form: "return ..." that are not self-referential.
