@@ -5,7 +5,7 @@ object Parenthesis {
 
   val w = Var("w", 3)
   val x = Var("x", 1)
-  
+ 
   val c = Var("c", 2)
   val par = Algorithm(c, i :: j :: Nil,
     0 <= i and i < n and i < j and j < n,
@@ -22,6 +22,9 @@ object Parenthesis {
     input(w)
     input(x)
     input(n)
+
+    // second argument defines ranking function
+    // termination is checked at every step of the proof
     add(par, j-i)
 
     val r = Var("r", 2)
@@ -37,7 +40,8 @@ object Parenthesis {
     val List(c1, c000, c001, c011) = split("c1", n < 4, i < n/2, j < n/2)(c0) 
   
     val c100 = rewrite("c100", c0)(n -> n/2)(c000) 
-    // use free assumption n mod 2 = 0    
+
+    // use free assumption n mod 2 = 0 everywhere
     val c111 = rewrite("c111", c0)(
         i->(i-n/2), 
         j->(j-n/2), 
@@ -73,14 +77,15 @@ object Parenthesis {
 
     // define d
     val d = Var("d0", 7)
-    val D = Algorithm(d, List(i, j, n, w, r, s, t), 0 <= i and i < n/2 and 0 <= j and j < n/2,
+    val D = Algorithm(d, List(i, j, n, w, r, s, t), 
+      0 <= i and i < n/2 and 0 <= j and j < n/2,
       Op(Reduce(s(i, k) + t(k, j) + w(i, k, j) where k in Range(0, n/2)), r(i, j)))
-    // important to have n
+
+    // important to have n to make split pass termination test
     add(D, n)
      
     val bij = b0.capture(2) 
 
-    // we can infer i and j displacements by looking at pre-condition of b0 and case of b000   
     val b100 = rewrite("b100", b0, $$.splitRange($, Var("k1"), n/4), $$.unfold($, D))(
         i->i,
         j->(j-n/4),
@@ -91,7 +96,10 @@ object Parenthesis {
         r->D.gen(2)(i, j-n/4, n/2, w1>>(0,n/4,n/2), 
           r>>(0,n/2),s>>(0,n/4),bij>>(n/4,n/2))          
       )(b000)
+
+    // specialize inner bij using the path condition
     val b200 = specialize("b200", b0)(b100)
+
     val b111 = rewrite("b111", b0, $$.splitRange($, Var("k2"), n/4+n/2), $$.unfold($, D))(
         i->(i-n/4),
         j->(j-n/2),
@@ -103,7 +111,9 @@ object Parenthesis {
         r->D.gen(2)(i, j-n/4, n/2, w>>(n/4,n/2,n/2+n/4),
           r>>(n/4,n/2+n/4), bij>>(n/4,n/2), t>>(n/2,n/2+n/4))
       )(b011)
+
     val b211 = specialize("b211", b0)(b111)
+    
     val b101 = rewrite("b101", b0, 
         $$.splitRange($, Var("k1"), n/4) andThen $$.splitRange($, Var("k2"), n/4+n/2),
         $$.unfold($, D) andThen $$.unfold($, D))(
@@ -117,6 +127,7 @@ object Parenthesis {
           D.gen(2)(i, j, n/2, w>>(0,n/2,n/2+n/4), r>>(0,n/2+n/4), bij>>(0,n/2), t>>(n/2,n/2+n/4)), 
           s>>(0,n/4), bij>>(n/4,n/2+n/4))        
       )(b001)
+    
     val b201 = specialize("b201", b0)(b101)
 
     val List(d1, d00, d01, d10, d11) = split("d1", n < 4, i < n/4, j < n/4)(D)
@@ -146,6 +157,7 @@ object Parenthesis {
       t->(t>>(n/4,n/4))
     )(d11)
 
+    // create imperative code generator; 2 makes it use (i, j) for table dimensions
     val py = new NumPython(2)    
     compile(par, new PrintStream(new File("paren.py")), py)
     SMT.close()

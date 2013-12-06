@@ -18,6 +18,7 @@ trait Logger {
     message("End of error message")
     if (STRICT)
       System.exit(-1)
+    null
   }
   
   def print(s: => Any) = Console.out.print(s.toString)

@@ -1173,10 +1173,8 @@ trait Lowering extends Environment {
           }
         }
 
-    if (candidates.exists(cycle(_))) {
+    if (candidates.exists(cycle(_))) 
       error("cycle detected: " + candidates)
-      ???
-    }
     
     def inline(e: Expr): Expr = transform(e) {
       case App(w, wargs0) =>
@@ -1243,7 +1241,6 @@ trait Lowering extends Environment {
             a.lift(Var(a.v.name, args1.size))(1 to (args1.size - a.args.size) map (_ => Const(0)) :_*)
           case None => 
             error("unknown variable: " + v)
-            ???
         }
     }    
 
