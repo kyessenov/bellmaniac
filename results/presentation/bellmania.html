@@ -90,7 +90,7 @@ add(par, j-i)
         <p>A collection of mutually recursive functions together with:</p>
         <ul>
           <li>a refinement relation: \(A \sqsubseteq B\) if A can be replaced by B in any context while preserving semantics.</li>
-          <li>a restriction relation: pre-condition strenthening</li>
+          <li>a restriction relation: pre-condition strengthening</li>
         </ul>
         <p>Initially: \(\{par\}\)</p>
         <p>Goal: \(\{A_{par}, B_{par}, C_{par}, \ldots\}\)</p>         
@@ -130,12 +130,13 @@ val par0 = manual($,
 
         <p class="fragment"><em>Missing:</em> inductive reasoning, folding/unfolding, modeling of higher-order functions, axiomatization of monadic operators, synthesis, ...</p>          
         
-        <p class="fragment">Think reasoning about symbolic expressions modulo SAT/integers</p>
+        <p class="fragment" style="font-style: italic;">Think reasoning about symbolic expressions modulo SAT/integers</p>
         </section>
         <section>
         <h2>Tactic repertoire</h2>
 
         <h3>Basic</h3>
+        <p>
         <ul>
           <li>manual: rewrite algorithm body and prove equivalence</li>
           <li>unfold: unfold a definition of an algorithm</li>
@@ -144,20 +145,25 @@ val par0 = manual($,
           <li>relax: generalize pre-condition</li>        
           <li>introduce: add parameters</li>
         </ul>
+        </p>
 
         <h3>Contextual</h3>
+        <p>
         <ul class="fragment">
-          <li>genApp: generalize function use to a parameter</li>
           <li>selfRefine, refine: replace call to a function by its refinement</li>
           <li>specialize: replace call to a function by its restriction</li>
         </ul>
+        </p>
 
         <h3>Complex</h3>
+        <p>
         <ul class="fragment">
+          <li>genApp: generalize function use to a parameter</li>
           <li>split: generate restrictions based on a partitioning scheme</li>
           <li>rewrite: rewrite function arguments and prove by induction</li>
         </ul>
-                  
+        </p>
+
         </section>
 
         <section>
@@ -230,14 +236,17 @@ val b100 = rewrite("b100", b0,
         <section>
         <h2>Lowering phases</h2>
         <ul>
-          <li>Full refinement, inlining: push all algorithms to finest level</li>
-          <li class="fragment">Add offsets</li>
+          <li>Full refinement, inlining: push all algorithms to the finest level</li>
+          <li class="fragment">Add offsets as parameters:
+          $$ \lambda i j . f(i + i_0, j + j_0) $$
+          </li>
           <li class="fragment">Common subexpression elimination: reuse computation across split partitions</li>
           <li class="fragment">Memory read/write bound analysis: use SMT to compute loop bounds, etc</li>
         </ul>
         </section>
 
         <section>
+        <h3>Projection of \(c_0\) to \(i, j\)</h3>
         <pre style="font-size:80%;"><code class="scala"  data-trim contenteditable>
 def c0(T, oi, oj, n, w, r, w_0, w_1, w_2, r_0, r_1):
   for i0 in xrange(((-1)*n + 1),1):
@@ -249,6 +258,7 @@ def c0(T, oi, oj, n, w, r, w_0, w_1, w_2, r_0, r_1):
         </section>
 
         <section>
+        <h3>Projection of \(c_1\) to \(i, j\)</h3>
         <pre style="font-size:80%;"><code class="scala"  data-trim contenteditable>
 def c1(T, oi, oj, n, w, r, w_0, w_1, w_2, r_0, r_1):
   if (n < 4):
@@ -281,7 +291,7 @@ def c1(T, oi, oj, n, w, r, w_0, w_1, w_2, r_0, r_1):
         slideNumber: true,
 
 				theme: Reveal.getQueryHash().theme, // available themes are in /css/theme
-				transition: Reveal.getQueryHash().transition || 'default', // default/cube/page/concave/zoom/linear/fade/none
+				transition: Reveal.getQueryHash().transition || 'none', // default/cube/page/concave/zoom/linear/fade/none
 
 				// Parallax scrolling
 				// parallaxBackgroundImage: 'https://s3.amazonaws.com/hakim-static/reveal-js/reveal-parallax-1.jpg',
