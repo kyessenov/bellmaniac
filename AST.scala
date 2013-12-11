@@ -4,7 +4,7 @@ sealed trait Computation {
 
 // Recursive algorithm definition
 case class Algorithm(v: Var, args: List[Var], pre: Pred, expr: Expr) extends Computation {
-  assert (v.arity == args.size)
+  assert (v.arity == args.size, "arity mismatch")
   override def toString = Python.print(this)
   // Extend to application of that by supplying remaining arguments 
   def lift(that: Funct)(rest: Expr*) = {
@@ -24,9 +24,11 @@ case class Algorithm(v: Var, args: List[Var], pre: Pred, expr: Expr) extends Com
 
   def translate(op: (Var, Expr)*) = 
     v.translate(args, op: _*)
+
+  def apply(params: List[Expr]) = expr.s(args zip params)  
 }
-// Input table (v arguments are one-dimensional)
-case class Input(v: Var) extends Computation {
+// Input table (v arguments are one-dimensional, values are uniform)
+case class Input(v: Var, e: Expr) extends Computation {
   override def toString = Python.print(this)
 }
 
@@ -96,10 +98,10 @@ sealed trait Expr extends Term {
   def >=(that: Expr) = GE(this, that)
   override def toString = Python.print(this)
   def arity = 0
-  def where(v: Var) = {
-    val that = this
-    new { def in(r: Range) = Compr(that, v, r) }
+  case class WhereConstruct(v: Var) {
+    def in(r: Range) = Compr(Expr.this, v, r) 
   }
+  def where(v: Var) = WhereConstruct(v)
   def s(subs: List[(Var, Expr)]) = Transform.substitute(this, subs.toMap)
 }
 
@@ -160,6 +162,23 @@ sealed trait Funct extends Expr {
     }
     OpVar(this, dargs, exprs)
   }
+  // Translation expression for arity 2
+  def >>(f: (Var, Var) => (Expr, Expr)) = {
+    assert (arity == 2)
+    val a0 = Var.fresh()
+    val a1 = Var.fresh()
+    val (e0, e1) = f(a0, a1)
+    OpVar(this, List(a0, a1), List(e0, e1))
+  }
+
+  // Root variable
+  def root = this match {
+    case v: Var => v
+    case op: OpVar => op.flatten.v match {
+      case v: Var => v
+      case _ => ???
+    }
+  }
 }
 
 case class Var(name: String, override val arity: Int = 0) extends Funct {
@@ -207,249 +226,6 @@ case class Range(l: Expr, h: Expr)
 case class Compr(expr: Expr, v: Var, r: Range) extends Seq 
 case class Join(l: Seq, r: Seq) extends Seq 
 case class Singleton(e: Expr) extends Seq 
-
-// Collect all variables
-object Vars {
-  def apply(t: Term): Set[Var] = t match {
-    case True | False => Set() 
-    case t: Comparison => apply(t.l) ++ apply(t.r)
-    case t: BinaryPred => apply(t.l) ++ apply(t.r)
-    case Not(p) => apply(p)
-    case e: BinaryExpr => apply(e.l) ++ apply(e.r)
-    case Zero | Havoc => Set()
-    case _: Const => Set() 
-    case Reduce(range) => apply(range)
-    case v: Var => Set(v)
-    case OpVar(v, args, exprs) => exprs.toSet[Expr].flatMap(apply(_)) ++ apply(v) -- args.toSet
-    case App(v, args) => args.toSet[Expr].flatMap(apply(_)) ++ apply(v)
-    case Compr(expr, v, Range(l, h)) => apply(expr) ++ Set(v) ++ apply(l) ++ apply(h)
-    case Join(l, r) => apply(l) ++ apply(r)
-    case Singleton(e) => apply(e)
-    case Cond(cases, default) => 
-      cases.flatMap { case (p, e) => apply(p) ++ apply(e) }.toSet ++
-      apply(default)
-  }
-}
-
-trait PythonPrinter {
-  def prelude: String
-  def print(s: Seq): String = s match {
-    case Singleton(e) => "[" + print(e) + "]"
-    case Join(l, r) => print(l) + " + " + print(r)
-    case Compr(e, v, Range(l, h)) => "[" + print(e) + " for " + print(v) + 
-      " in xrange(" + print(l) + ", " + print(h) + ")]"
-  }
-  def print(e: Expr): String = e match {
-    case Var(n, _) => n
-    case Const(i) => if (i >= 0) i.toString else "(-" + (-i).toString + ")"
-    case Plus(l, r) => "(" + print(l) + " + " + print(r) + ")"
-    case Minus(l, r) => "(" + print(l) + " - " + print(r) + ")"
-    case Times(l, r) => print(l) + "*" + print(r)
-    case Div(l, r) => print(l) + "/" + print(r)
-    case Mod(l, r) => "(" + print(l) + " mod " + print(r) + ")"
-    case App(v, args) => print(v) + "(" + args.map(print(_)).mkString(", ") + ")"
-    case Op(l, r) => "plus(" + print(l) + ", " + print(r) + ")"
-    case Reduce(r) => "reduce(plus, " + print(r) + ", zero)"
-    case Zero => "zero"
-    case Havoc => "None"
-    case OpVar(v, args, exprs) => "(lambda " + args.map(print(_)).mkString(", ") + 
-      ": " + print(v) + "(" + exprs.map(print(_)).mkString(", ") + "))"
-    case Cond(cases, default) => cases match {
-      case (pred, expr) :: rest => "(" + print(expr) + " if " + print(pred) + " else " + (rest match {
-          case Nil => print(default)
-          case _ => print(Cond(rest, default))
-        }) + ")"
-      case _ => ???
-    }  
-  }
-  def print(p: Pred): String = p match {
-    case True => "True"
-    case False => "False"
-    case And(l, r) => "(" + print(l) + " and " + print(r) + ")"
-    case Or(l, r) => "(" + print(l) + " or " + print(r) + ")"
-    case Not(l) => "(not " + print(l) + ")"
-    case Eq(l, r) => "(" + print(l) + " == " + print(r) + ")"
-    case LT(l, r) => "(" + print(l) + " < " + print(r) + ")"
-    case GT(l, r) => "(" + print(l) + " > " + print(r) + ")"
-    case LE(l, r) => "(" + print(l) + " <= " + print(r) + ")"
-    case GE(l, r) => "(" + print(l) + " >= " + print(r) + ")"
-  }
-  def print(c: Computation): String
-  def print(p: List[Computation], out: java.io.PrintStream) {
-    out.println(prelude)
-    for (c <- p)
-      out.println(print(c))
-  }
-}
-// Functional style code output
-object Python extends PythonPrinter {
-  override val prelude = 
-"""class memoize(dict):
-  def __init__(self, func):
-    self.func = func
-  def __call__(self, *args):
-    return self[args]
-  def __missing__(self, key):
-    result = self[key] = self.func(*key)
-    return result
-plus = min
-zero = pow(10, 16)
-import random
-import sys
-sys.setrecursionlimit(2 ** 16)
-"""
-  def print(c: Computation): String = c match {
-    case a: Algorithm =>
-      "def " + print(a.v) +
-      "(" + a.args.map(print(_)).mkString(", ") + "):\n" +     
-      "  assert " + print(a.pre) + 
-      "\n" + { a.expr match {
-        case Cond(cases, default) => "  if " + cases.map { case (pred, expr) => 
-          print(pred) + ":\n    return " + print(expr) }.mkString("\n  elif ") + 
-          "\n  else:\n    return " + print(default)        
-        case e => "  return " + print(e)
-      }}
-    case Input(v) => 
-      if (v.arity == 0)
-        print(v) + " = 16" 
-      else 
-        "@memoize\ndef " + print(v) + "(" + 
-          (1 to v.arity).map("v"+_).mkString(", ") + "):\n" +
-        "  return random.randint(0, 1000)" 
-  }
-}
-object SMT {
-  private var z3: Z3 = _
-
-  import collection.mutable.ListBuffer
-  def print(e: Expr)(implicit side: ListBuffer[String]): String = e match {
-    case Var(n, k) if k == 0 => n
-    // apply to variable witnesses
-    case v: Funct  => print(App(v, (1 to v.arity).map(i => witness(i-1)).toList))
-    case Const(i) => if (i >= 0) i.toString else "(- " + (-i).toString + ")"
-    case Plus(l, r) => "(+ " + print(l) + " " + print(r) + ")"
-    case Minus(l, r) => "(- " + print(l) + " " + print(r) + ")"
-    case Times(l, r) => "(* " + print(l) + " " + print(r) + ")"
-    case Div(l, r) => 
-      // TODO: can't easily express n is a power of two
-      if (Vars(l).isEmpty || ! Vars(r).isEmpty)
-        error("can't assume divisibility of " + Div(l,r))
-      side += "(assert " + print((l mod r) === Const(0)) + ")"
-      "(div " + print(l) + " " + print(r) + ")"
-    case Mod(l, r) => "(mod " + print(l) + " " + print(r) + ")"
-    case Zero => "zero"
-    case Havoc =>
-      val v = Var.fresh()
-      side += "(declare-const " + v.name + " Int)"
-      print(v)
-    case Op(l, r) => "(plus " + print(l) + " " + print(r) + ")"
-    case Reduce(r) => "(reduce " + print(r) + ")"
-    case a: App => a.flatten match {
-      case App(Var(n, k), args) => "(" + n + " " + args.map(print(_)).mkString(" ") + ")"
-      case _ => ???
-    }
-    case Cond(cases, d) => cases match {
-      case (p, e) :: rest=> "(ite " + print(p) + " " + print(e) + "\n " + {
-        rest match {
-          case Nil => print(d)
-          case _ => print(Cond(rest, d)) 
-        }} + ")"
-      case _ => ???
-    }
-  }
-  def print(s: Seq)(implicit side: ListBuffer[String]): String = s match {
-    case Singleton(e) => "(singleton " + print(e) + ")"
-    case Join(l, r) => "(join " + print(l) + " " + print(r) + ")"
-    case Compr(e, v, Range(l, h)) => "(compr " + 
-      print(e.s(List(v->(iterator+l)))) + " " + print(h-l) + ")"
-  }
-  def print(p: Pred)(implicit side: ListBuffer[String]): String = p match {
-    case True => "true"
-    case False => "false"
-    case And(l, r) => "(and " + print(l) + " " + print(r) + ")"
-    case Or(l, r) => "(or " + print(l) + " " + print(r) + ")"
-    case Not(l) => "(not " + print(l) + ")"
-    case Eq(l, r) => "(= " + print(l) + " " + print(r) + ")"
-    case LT(l, r) => "(< " + print(l) + " " + print(r) + ")"
-    case GT(l, r) => "(> " + print(l) + " " + print(r) + ")"
-    case LE(l, r) => "(<= " + print(l) + " " + print(r) + ")"
-    case GE(l, r) => "(>= " + print(l) + " " + print(r) + ")"
-  }
-
-  // Special variables
-  val iterator = Var("_i")
-  val witness = (1 to 16).map(i => Var("_w" + i)).toList
-
-  // Try to prove the negative
-  def check(p: Pred) = ! prove(! p)
-
-  // Prove the predicate by checking for counter example.
-  // Returns true if the solver says "unsat" for !p, false if "sat" or "unknown"
-  def prove(p: Pred) = {
-    val side = new ListBuffer[String]
-    for (v <- Vars(p)) {
-      side += "(declare-fun " + v.name + 
-        " (" + (1 to v.arity).map(_ => "Int").mkString(" ")+ ") Int)";
-    }
-    
-    val formula = print(! p)(side)
-
-    z3.push()
-    for (s <- side)
-      z3.command(s)
-    z3.assert(formula)
-    val out = z3.check()
-    z3.pop()
-
-    out == Unsat
-  }
-
-  def open() {
-    z3 = new Z3
-    z3.command("(declare-fun zero () Int)")
-    z3.command("(declare-fun plus (Int Int) Int)")
-    // substitute + for plus
-    //z3.command("(define-fun plus ((a Int) (b Int)) Int (+ a b))")
-
-    // zero for plus
-    z3.command("(assert (forall ((x Int)) (= (plus x zero) x)))")
-    z3.command("(assert (forall ((x Int)) (= (plus zero x) x)))")
-
-    // plus is commutative and associative
-    z3.command("(assert (forall ((x Int) (y Int)) (= (plus x y) (plus y x))))")
-    z3.command("(assert (forall ((x Int) (y Int) (z Int)) (= (plus x (plus y z)) (plus (plus x y) z))))") 
-
-    // monoid
-    z3.command("(declare-sort M)")
-    z3.command("(declare-fun reduce (M) Int)")
-    z3.command("(declare-fun join (M M) M)")
-    z3.command("(declare-fun compr (Int Int) M)")
-
-    // push reduce down
-    z3.command("(assert (forall ((x M) (y M)) (= (reduce (join x y)) (plus (reduce x) (reduce y)))))")
-
-    // eliminate singleton
-    z3.command("(declare-fun singleton (Int) M)")
-    z3.command("(assert (forall ((x Int)) (= (reduce (singleton x)) x)))")
-
-    // eliminate empty comprehension
-    z3.command("(assert (forall ((x Int)) (= (reduce (compr x 0)) zero)))")
- 
-    // iterator
-    z3.command("(declare-fun " + iterator.name + " () Int)")
-    
-    // equality witnesses
-    for (w <- witness) 
-      z3.command("(declare-fun " + w.name + " () Int)")   
-
-    assert(! prove(False) && prove(True), "over constraining check")
-  }
-
-  def close() {
-    z3.close()
-  }
-}
-
 
 object Transform {
   // path is the path condition
@@ -520,6 +296,22 @@ object Transform {
       }
     }
 
+  def visit(t: Term)(implicit path: Pred, stack: List[Var], f: Transformer): Term = 
+    t match {
+      case t: Pred => visit(t)
+      case t: Expr => visit(t)
+      case t: Seq => visit(t)
+    }
+
+  // non-local vars
+  def vars(t: Term): Set[Var] = {
+    var out: Set[Var] = Set()
+    visit(t)(True, Nil, exprTransformer {
+      case (_, locals, v: Var) if ! locals.contains(v) => out = out + v; v
+    })
+    out
+  }
+
   // transformers
 
   def transformer(f: PartialFunction[Term, Term]) = new Transformer {
@@ -585,9 +377,8 @@ object Transform {
   }
 }
 
-
 // Program environment
-trait Environment extends Logger {
+trait Environment extends SMT with Logger {
   // all input tables
   var inputs: List[Input] = List()
   
@@ -604,8 +395,8 @@ trait Environment extends Logger {
   // restrictions (v, w with stronger pre-condition) 
   var restricts: List[(Algorithm, Algorithm)] = Nil
 
-  def input(v: Var) {
-    inputs = Input(v) :: inputs
+  def input(v: Var, e: Expr = Havoc) {
+    inputs = Input(v, e) :: inputs
   }
 
   // Check for soundness of an algorithm before adding to environment
@@ -650,7 +441,7 @@ trait Environment extends Logger {
       if (that.g > this.g) 
         false
       else if (this.g == that.g && 
-              ! SMT.prove(path implies that.e < this.e)) 
+              ! prove(path implies that.e < this.e)) 
         false
       else
         true
@@ -703,7 +494,7 @@ trait Environment extends Logger {
   def showCallGraph() {
     GraphViz.display {
       for (a <- algorithms;
-           v <- Vars(a.expr);
+           v <- Transform.vars(a.expr);
            b <- algorithms if b.v == v)
          yield (a.v.name, "", b.v.name)
     }
@@ -726,13 +517,14 @@ class Proof extends Environment with Lowering {
   case class NonTermination(s: String) extends RuntimeException
 
   override def validate(a: Algorithm) {
+    println("validating " + a.v)
     welldefined(a, metric(a), true)
   }
       
   def welldefined(a: Algorithm, m: Metric, err: Boolean = false): Boolean = { 
     try {
       welldefined(flatten(a.expr), a.pre, a.args)(0, Set(), m)     
-      if (! SMT.prove(a.pre implies m.e >= Const(0)))
+      if (! prove(a.pre implies m.e >= Const(0)))
         throw NonTermination("can't prove base termination: " + a)
       true
     } catch {
@@ -740,7 +532,7 @@ class Proof extends Environment with Lowering {
         if (err) error("pre-condition violation at " + t + " in " + a.v)
         false
       case NonTermination(s) => 
-        if (err) error(s + " in " + a.v)
+        if (err) error("welldefined: " + a.v + " " + m + ": " + s)
         false
     }
   }
@@ -779,7 +571,7 @@ class Proof extends Environment with Lowering {
           algorithms.find(_.v == v) match {
             case Some(a) =>             
               // check for pre-condition
-              if (CHECK_PRE && ! SMT.prove(path implies a.pre.s(a.args zip vargs))) 
+              if (CHECK_PRE && ! prove(path implies a.pre.s(a.args zip vargs))) 
                 throw PreFailure(app)
             
               // check for termination
@@ -813,7 +605,7 @@ class Proof extends Environment with Lowering {
     case in @ Algorithm(v, args, pre, e) =>
       val out = Algorithm(v.rename(name), args, pre, body)
       val out1 = hint(out)
-      if (! SMT.prove(pre implies (e === out1.expr))) {        
+      if (! prove(pre implies (e === out1.expr))) {        
         error("failed to prove equivalence of body expressions")
         in
       } else
@@ -821,12 +613,10 @@ class Proof extends Environment with Lowering {
   }
 
   // Add parameters to a function 
-  def introduce(name: String, vs: Var*) = step0 {
+  def introduce(name: String, vs: Var*)(m: Expr) = step0 {
     case a @ Algorithm(v, args, pre, e) => 
       val w = Var(name, v.arity + vs.size)
-      // add 0-arity vs to metric
-      val m = vs.filter(_.arity == 0).fold(metric(a).e)(_ + _)
-      (Algorithm(w, args ++ vs.toList, pre, e), a.lift(w)(vs.toList:_*), m)
+      (Algorithm(w, args ++ vs.toList, pre, e), a.lift(w)(vs.toList:_*), metric(a).e + m)
   }
 
   // Push self-application down the refinement chain
@@ -854,7 +644,11 @@ class Proof extends Environment with Lowering {
   }
 
   // Specialize each application of c0 to its immediate version
-  def specialize(name: String, c0: Algorithm) = step {
+  // todo: unchecked to
+  def specialize(name: String, c0: Algorithm): Refinement = 
+    specialize(name, c0, restricts.collect { case (a, c1) if a == c0 => c1 })
+
+  def specialize(name: String, c0: Algorithm, to: List[Algorithm]): Refinement = step {
     case in @ Algorithm(v, args, pre, expr) =>
       val w = v.rename(name)
 
@@ -863,8 +657,7 @@ class Proof extends Environment with Lowering {
       var proceed = true
 
       while (proceed) {
-        restricts.toStream
-        .collect { case (a, c1) if a == c0 => c1 }
+        to.toStream
         .map { case c1 =>
           var i = - 1      
           Algorithm(w, args, pre, transform(out.expr) {
@@ -908,7 +701,7 @@ class Proof extends Environment with Lowering {
             case (b, split) => if (b) split else !split
           } reduce (_ and _)
 
-          if (SMT.check(p and pre)) {
+          if (check(p and pre)) {
             val n = v.name + mask.reverse.map(if (_) "0" else "1").mkString
             val cs = Algorithm(Var(n, v.arity), args, pre and p, App(v, args))
             out = out ELIF (p -> App(cs.v, args))
@@ -937,8 +730,6 @@ class Proof extends Environment with Lowering {
       alg :: algs
   }
 
-  // Rewrite calls to c as d = OpVar(c,...) provided substitution
-  // is correct under path condition
   def rewrite(name: String, ov: Algorithm, 
     hint1: Refinement = id, hint2: Refinement = id)(ve: (Var, Expr)*) =
     rewrite0(name, ov, ov, ov.v, hint1, hint2)(ve: _*)
@@ -950,57 +741,51 @@ class Proof extends Environment with Lowering {
       case in @ Algorithm(v, args, pre, e) =>
         val w = v.rename(name)
         Algorithm(w, args, pre, 
-          transform(in) {
+          flatten(transform(in) {
             case (path, _, App(w, args)) if w == ov.v && 
               inductiveProof(path, ov, nv, op, hint1, hint2) =>
               (App(op, args).flatten)
-          })
+          }))
     }
   }
 
-  // CONTROLS FOR THEOREM PROVER
-  var SKIP_FIRST = false
-    
-  // Prove by induction that pred(v) => c(v) = c(f(v)) where d = OpVar(c, f)
+  // Prove by induction that pred(v) => ov(v) = op(v) where op invokes nv
   private def inductiveProof(pred: Pred, ov: Algorithm, nv: Algorithm, op: Funct, 
     hint1: Refinement, hint2: Refinement): Boolean = {
-    // check domains: d is well defined for substitution
-    val domain = (pred and ov.pre) implies nv.pre.s(nv.args zip App(op, ov.args).flatten.args)
-    if (! SMT.prove(domain)) {
-      error("failed domain check")
-      return false
-    }
+    assert(op.root == nv.v, "op must have nv variable")
 
-    // apply proof hint and get expression
-    val oalg = hint1(Algorithm(ov.v, ov.args, pred and ov.pre, ov.expr))
+    // restrict and apply proof hints
+    val oalg = hint1(restrict(ov.v.name, pred)(ov))
+    val nalg = hint2(ov.copy(expr = nv(App(op, ov.args).flatten.args)))
 
-    // prove by induction on v (c's metric)
-    // inductive step
-    var skip = SKIP_FIRST
+    // prove by induction on v (ov's metric)
+    // treat ov as uninterpreted and prove expression equality
+
+    // inductive call
+    var pre = List(oalg.pre)
+   
     val oind = flatten(transform(oalg) {
-      case (path, _, app @ App(v, args)) if v == ov.v => 
-        if (SMT.check(path and ! pred.s(ov.args zip args))) {
-          // violation of the inductive step predicate
-          app
-        } else {          
-          if (skip) {
-            // force skip for base case
-            skip = false
-            app
-          } else {
-            // by induction hypothesis
-            App(op, args)
-          }
+      case (path, locals, App(v, args)) if v == ov.v => 
+        if (check(path and ! pred.s(ov.args zip args)))
+          App(ov.v, args)
+        else if (locals.size == ov.args.size) {
+          val ind = Var.fresh("ind")
+          pre ::= ind === flatten(App(v, args))
+          pre ::= ind === flatten(App(op, args))
+          ind
+        } else {
+          // force induction under "compr" or "opvar" since translation modifies the expression
+          App(op, args).flatten
         }
     })
-    val nind = flatten(hint2(Algorithm(nv.v, nv.args, pred and nv.pre, 
-      nv.expr.s(nv.args zip App(op, ov.args).flatten.args))).expr)
+    
+    val nind = flatten(nalg.expr)
   
-    if (! SMT.prove((pred and ov.pre) implies (oind === nind))) {
-      message("pred")
-      println(pred)
+    if (! prove(pre.reduce(And) implies (oind === nind))) {
+      message("pre")
+      for (p <- pre) println(p)
       message("goal expression")
-      println(oind)
+      println(oind)      
       message("derived expression")
       println(nind)
       error("failed to prove equation equality")
@@ -1026,7 +811,7 @@ class Proof extends Environment with Lowering {
       val w = v.rename(name)
       Algorithm(w, args, pre, transform(in, seqTransformer {
         case (path, _, compr @ Compr(e, v, Range(l, h))) if v == k => 
-          if (! SMT.prove(path implies (l <= mid and mid <= h))) {
+          if (! prove(path implies (l <= mid and mid <= h))) {
             error("can't split range since value may lay outside of range")
             compr
           } else {
@@ -1047,16 +832,21 @@ class Proof extends Environment with Lowering {
 
   // Generalize pre-condition
   def relax(name: String, pred: Pred) = step {
-    case a @ Algorithm(v, args, pre, expr) =>
-      val w = v.rename(name)
-      val pre1 = 
-        if (! SMT.prove(pre implies pred)) {
+    case Algorithm(v, args, pre, expr) =>
+      Algorithm(v.rename(name), args, 
+        if (! prove(pre implies pred)) {
           error("cannot relax precondition " + pre + " to " + pred)
           pre
         } else {
           pred
         }
-      Algorithm(w, args, pre1, expr)
+      , expr)
+  }
+
+  // Restrict pre-condition (useful for development)
+  def restrict(n: String, pred: Pred): Refinement = {
+    case Algorithm(v, args, pre, expr) =>
+      Algorithm(v.rename(n), args, pre and pred, expr)
   }
 
   // Generalize variable application 
@@ -1166,7 +956,7 @@ trait Lowering extends Environment {
       if (visited.contains(a))
         true
       else
-        Vars(a.expr).exists { v => 
+        vars(a.expr).exists { v => 
           candidates.find(_.v == v) match {
             case None => false
             case Some(b) => cycle(b, visited + a)
@@ -1312,4 +1102,7 @@ object Prelude {
   val o = Var("o")
   val p = Var("p")
   val q = Var("q")
+  import scala.language.implicitConversions
+  implicit def int2expr(i: Int) = Const(i)
+  implicit def expr2singleton(e: Expr) = Singleton(e)
 }

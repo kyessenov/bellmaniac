@@ -17,7 +17,7 @@ trait Logger {
     println(s)
     message("End of error message")
     if (STRICT)
-      System.exit(-1)
+      throw new RuntimeException("strict mode")
     null
   }
   

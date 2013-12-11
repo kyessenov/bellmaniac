@@ -1,7 +1,6 @@
 object Floyd {
   import Prelude._
   import java.io.{File, PrintStream}
-  implicit def int2expr(i: Int) = Const(i)
 
   val r = Var("r", 2)
   val f = Var("f", 3)
@@ -16,15 +15,14 @@ object Floyd {
       (f(i, j, k-1) + f(i, k-1, k-1) * f(k-1, j, k-1)))
 
   def main(args: Array[String]) {
-    SMT.open()
-    val proof = new Proof()    
+    val proof = new Proof 
     import proof._
 
-    input(r)
     input(n)
+    input(r)
     add(F, k)
 
-    val a = (introduce($, n, r) andThen selfRefine("a"))(F)
+    val a = (introduce($, n, r)(n) andThen selfRefine("a"))(F)
     val List(a1, a000, a001, a010, a011, a100, a101, a110, a111) = split("a1", n < 2,
         i < n/2, j < n/2, k <= n/2)(a)
 
@@ -50,8 +48,7 @@ object Floyd {
       i->(i-n/4), j->(j-n/4), n->n/2, r->(r>>(n/4,n/4)), 
       s->(s>>(n/4,0,0)), t->(t>>(0,n/4,0))))(b110)
     
-    SKIP_FIRST = true
-    // k = n/4 should be in the first case
+    // k = n/4 is the special case
     val b101x = rewrite("b101x", b, $$.guard($, k === n/4))(
       i->(i-n/4), k->(k-n/4), n->n/2, 
       s->(s>>(n/4,n/4,n/4)), 
@@ -74,7 +71,6 @@ object Floyd {
       t->(t>>(n/4,n/4,n/4)),
       r->d.gen(2)(i, j+n/4, n/4, n, r, s, t)
       ))(b011)
-    SKIP_FIRST = false
  
     // lift version of a
     val k0 = k.fresh
@@ -93,7 +89,7 @@ object Floyd {
     val a110x = rewrite0("a110x", a, d, a.lift(d.v)(ax>>(n/2,0,0), ax>>(0,n/2,0)))(
       i->(i-n/2), j->(j-n/2), r->(r>>(n/2,n/2))
     )(a110)
-    SKIP_FIRST = true
+    // relax to k >= n/2
     val a111x = (relax($, a.pre and i >= n/2 and j >= n/2 and k >= n/2) andThen 
       rewrite("a111x", a, $$.guard($, k === n/2))(
         i->(i-n/2), j->(j-n/2), k->(k-n/2), n->n/2, r->(amid>>(n/2, n/2))
@@ -111,10 +107,8 @@ object Floyd {
         k->(k-n/2), r->amid
       ))(a001) 
 
-    SKIP_FIRST = false
-
     compile(F, new PrintStream(new File("floyd.py")))
-    SMT.close()
+    close()
   }
 }
 

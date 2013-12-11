@@ -51,12 +51,12 @@ case class Linear(terms: Map[Var, Rational], free: Rational) {
     Linear(terms - v, free)
   def has(v: Var) = terms.contains(v)
   def +(that: Linear) =
-    Linear.make((this.vars ++ that.vars) map {
-      v => (v, this.proj(v) + that.proj(v))} toMap, 
+    Linear.make((this.vars ++ that.vars).map {
+      v => (v, this.proj(v) + that.proj(v))}.toMap, 
     this.free + that.free)
   def -(that: Linear) = 
-    Linear.make((this.vars ++ that.vars) map {
-      v => (v, this.proj(v) - that.proj(v))} toMap, 
+    Linear.make((this.vars ++ that.vars).map {
+      v => (v, this.proj(v) - that.proj(v))}.toMap, 
     this.free - that.free)
   def *(r: Rational) =
     Linear.make(terms.mapValues(_*r), free*r)

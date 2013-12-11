@@ -1,8 +1,6 @@
 object Parenthesis {
   import Prelude._
   import java.io.{PrintStream, File}
-  // automatically convert integers to symbolic integers
-  implicit def int2expr(i: Int) = Const(i)
   
   // function w takes 3 inputs, x takes 1 input
   val w = Var("w", 3)
@@ -21,14 +19,13 @@ object Parenthesis {
    
   def main(args: Array[String]) {
     // initiate refinement environment
-    SMT.open()
     val proof = new Proof()
     import proof._
    
     // add w,x,n as global input tables
+    input(n, 128)
     input(w)
     input(x)
-    input(n)
 
     // add par
     // second argument defines decreasing ranking function 
@@ -49,7 +46,7 @@ object Parenthesis {
       $$.unfold($, R))(par)
 
     // add n,w,r as parameters to c
-    val c0 = (introduce($, n, w, r) andThen 
+    val c0 = (introduce($, n, w, r)(n) andThen 
       // recurse to c0 instead of c
       selfRefine("c0"))(par0)    
 
@@ -205,16 +202,13 @@ object Parenthesis {
       t->(t>>(n/4,n/4))
     )(d11)
 
-    // print out all algorithms
-    for (a <- algorithms) println(a)
-
     // create imperative code generator; 2 makes it use (i, j) for table dimensions
-    val py = new NumPython(2)    
+    val py = new NumPython(proof, 2)    
 
     // refine all functions to finest level, inline, introduce offsets,
     // eliminate common sub-expressions, introduce valid memory overwrites
     compile(par, new PrintStream(new File("paren.py")), py)
-    SMT.close()
+    close()
   }
 }
 
