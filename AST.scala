@@ -162,13 +162,19 @@ sealed trait Funct extends Expr {
     }
     OpVar(this, dargs, exprs)
   }
-  // Translation expression for arity 2
+  // Translation expression for fixed arity
   def >>(f: (Var, Var) => (Expr, Expr)) = {
     assert (arity == 2)
-    val a0 = Var.fresh()
-    val a1 = Var.fresh()
+    val (a0, a1) = (Var.fresh(), Var.fresh())
     val (e0, e1) = f(a0, a1)
     OpVar(this, List(a0, a1), List(e0, e1))
+  }
+
+  def >>(f: (Var, Var, Var) => (Expr, Expr, Expr)) = {
+    assert (arity == 3)
+    val (a0, a1, a2) = (Var.fresh(), Var.fresh(), Var.fresh())
+    val (e0, e1, e2) = f(a0, a1, a2)
+    OpVar(this, List(a0, a1, a2), List(e0, e1, e2))
   }
 
   // Root variable
@@ -849,6 +855,9 @@ class Proof extends Environment with Lowering {
       Algorithm(v.rename(n), args, pre and pred, expr)
   }
 
+  def app(n: String): Refinement = 
+    step { in => in.copy(v = in.v.rename(n), expr = App(in.v, in.args)) }
+
   // Generalize variable application 
   // Find "which" application of "ov" and replace by "nv" with lower arity
   def genApp(name: String, ov: Var, nv: Var, which: Int = 0) = step0 {
@@ -912,7 +921,8 @@ trait Lowering extends Environment {
           }          
       })
     }
-  
+ 
+    println("leaves " + leaves.map(_.v).mkString(" "))
     // modify bodies to refer only to leaves
     val concretized = for (l @ Algorithm(v, args, pre, e) <- leaves)  
       yield Algorithm(v, args, pre, flatten(concretizeAll(pre, args, e)(l)))
@@ -920,12 +930,12 @@ trait Lowering extends Environment {
     val out = concretized ::: keep
          
     // copy all metrics but all at same generation
-    val p = new Proof { override val CHECK_PRE = false }
-    p.inputs = this.inputs
-    p.algorithms = out
-    p.metrics = 
-      for (a <- out; (b, m) <- metrics if b.v == a.v)
-        yield (a, p.Metric(0,m.e))
+    // val p = new Proof { override val CHECK_PRE = false }
+    // p.inputs = this.inputs
+    // p.algorithms = out
+    // p.metrics = 
+    //  for (a <- out; (b, m) <- metrics if b.v == a.v)
+    //    yield (a, p.Metric(0,m.e))
     
     // p.showCallGraph
     
@@ -946,7 +956,7 @@ trait Lowering extends Environment {
     // simple programs
     val candidates = p.filter {
       _.expr match {
-        case e: App => true        
+        case App(_: Var, _) => true        
         case _ => false
       }
     } 
@@ -968,18 +978,18 @@ trait Lowering extends Environment {
     
     def inline(e: Expr): Expr = transform(e) {
       case App(w, wargs0) =>
-        assert(w.isInstanceOf[Var], "must be flattened")
+        assert(w.isInstanceOf[Var], "must be flattened" + w)
         val wargs = wargs0 map inline
         candidates.find(_.v == w) match {
           case Some(c) => c.expr.s(c.args zip wargs)
           case None => App(w, wargs)
         }
       case OpVar(w, wargs, wexprs0) => 
-        assert(w.isInstanceOf[Var], "must be flattened")
+        assert(w.isInstanceOf[Var], "must be flattened: " + w)
         val wexprs = wexprs0 map inline
         candidates.find(_.v == w) match {
           case Some(c) => c.expr match {
-            case App(u, uargs) => OpVar(OpVar(u, c.args, uargs), wargs, wexprs).flatten
+            case App(u, uargs) => OpVar(OpVar(u, c.args, uargs), wargs, wexprs)
             case _ => ???
           }
           case None => OpVar(w, wargs, wexprs)
@@ -988,7 +998,7 @@ trait Lowering extends Environment {
 
     @annotation.tailrec
     def inline1(e: Expr): Expr = {
-      val e1 = inline(e)
+      val e1 = flatten(inline(e))
       if (e1 == e)
         e
       else
@@ -997,7 +1007,7 @@ trait Lowering extends Environment {
 
     for (a @ Algorithm(v, args, pre, expr) <- p;
          if ! candidates.contains(a))
-      yield Algorithm(v, args, pre, inline1(expr))    
+      yield Algorithm(v, args, pre, inline1(flatten(expr)))    
   }
 
   // Generalize arguments by adding offsets to every argument function

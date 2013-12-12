@@ -209,14 +209,14 @@ from numpy import *
     def make(app: App): Write =
       make(app, T, offv zip scope.args.take(dom) map Plus.tupled)
 
-    // off is offsets for T (where write should happen)
+    // off is compared to first arguments of app for offsets
     // outputs list of write with last corresponding to this "app"
     // each child T is used only once in the parent
     def make(app: App, T: Var, off: List[Expr]): Write = app match {
       case App(v: Var, args) =>
         val offsets = 
           for ((o, a) <- off zip args.take(dom))
-            yield Linear.make(o - a)
+            yield Linear.make(o - a).expr
              
         var deps: List[Write] = Nil 
 
@@ -225,14 +225,17 @@ from numpy import *
           case OpVar(v, args, exprs) =>
             assert(v.isInstanceOf[Var], "must be flattened")
             assert(exprs.startsWith(args), "must be fully linearized")
-            assert(args.size == dom, "must match dom")            
+            //assert(args.size == dom, "must match dom")            
             val T1 = T.fresh
             // todo: extract offsets from the opvar
-            deps = make(App(v, exprs), T1, args) :: deps
+            // deps = make(App(v, exprs), T1, args) :: deps
+
+            // XXX: hack below
+            deps = make(App(v, exprs), T1, args ::: exprs.take(dom - args.size)) :: deps
             T1
         }
         
-        Write(v, T, offsets.map(_.expr), rest, deps.reverse) 
+        Write(v, T, offsets, rest, deps.reverse) 
     }
   }
 
@@ -434,7 +437,7 @@ from numpy import *
         (all(d-1) map { case Rotation(flips) => Rotation(true :: flips) })
   }
 
-  case class Vector(path: Pred, v: Var, c: List[Expr])
+  case class Vector(path: Pred, v: Var, c: List[Expr]) 
 
   class LoopConstruct(a: Algorithm) extends Logger {
     val pre = a.pre
@@ -455,15 +458,21 @@ from numpy import *
     }
 
     // domination order
-    def LE(a: List[Expr], b: List[Expr]) = 
-      a zip b map { case (x, y) => x <= y} reduce(And)
+    def lexorder(a: List[Expr], b: List[Expr]): Pred = (a, b) match {
+      case (Nil, Nil) => True
+      case (a0 :: a1, b0 :: b1) => a0 < b0 or (a0 === b0 and lexorder(a1, b1))
+      case _ => ???
+    }
     
     // find domination order orientation
-    def orient(vs: List[Vector]): Rotation = {
-      for (r <- Rotation.all(dom))
-        if (vs.forall { case Vector(p, _, v) => smt.prove(p implies LE(r(v), r(c))) })
-          return r
-      error("can't orient in domination order")    
+    def orient(vs: List[Vector]): (Rotation, List[Int]) = {
+      for (p <- (0 to dom-1).toList.permutations;
+           r <- Rotation.all(dom))
+        if (vs.forall { case Vector(path, _, vc) => 
+          smt.prove(path implies lexorder(p.map(r(vc)(_)), p.map(r(c)(_)))) 
+        })
+          return (r, p)
+      error("can't orient in domination order: " + vs.mkString(", "))    
     }
     implicit def int2rat(n: Int) = new Rational(n, 1)
     implicit def int2expr(n: Int) = Const(n)
@@ -544,8 +553,9 @@ from numpy import *
     // returns (list of iteration variables, list of their ranges, assignment to actual variables)
     def generate: (List[Var], List[Range], List[Expr]) = {
       // orient dependency vectors by flipping +/- coordinates so that they point
-      // into lower-left corner
-      val r = orient(vectors)
+      // into lower-left corner in the lexicographic order
+      // p applied after r
+      val (r, p) = orient(vectors)
 
       // find iteration order and bounds
       // create fresh variables: c1 = r(c)
@@ -555,14 +565,12 @@ from numpy import *
       val exprs = r.inverse(c1)
       val pre1 = pre.s(c zip exprs)
 
-      // try to order variables so that we can solve them one by one
-      for (p <- c1.permutations) 
-        inferBounds(p, pre1) match {
-          case Some(ranges) => return (p, ranges, exprs)
-          case _ =>
-        }
-     
-      error("can't infer bounds: " + pre1)
+      // solve for bounds
+      val p1 = p.map(c1(_))
+      inferBounds(p1, pre1) match {
+        case Some(ranges) => (p1, ranges, exprs)
+        case _ => error("can't infer bounds: " + pre1)
+      }
     }
   }
 

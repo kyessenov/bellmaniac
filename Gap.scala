@@ -31,7 +31,7 @@ object Gap {
     val proof = new Proof
     import proof._
     
-    input(n, 128)
+    input(n, 64)
     input(w)
     input(w1)
     input(w2, 0)
