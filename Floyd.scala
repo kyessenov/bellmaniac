@@ -170,6 +170,7 @@ object Floyd {
 
     compile(floyd, new PrintStream(new File("floyd.py")), 
       new NumPython(proof, 3))
+    println(proof)
     close()
   }
 }

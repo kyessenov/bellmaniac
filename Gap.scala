@@ -173,6 +173,7 @@ object Gap {
 
     val py = new NumPython(proof, 2)    
     compile(gap, new java.io.PrintStream(new java.io.File("gap.py")), py)
+    println(proof)
     close()
   }
 

@@ -507,9 +507,10 @@ trait Environment extends SMT with Logger {
   }
 
   override def toString = 
-    "algorithms: " + algorithms.map(_.v).mkString(", ") + "\n" +
+    "algorithms: " + algorithms.size + "\n" +
     "inputs: " + inputs.map(_.v).mkString(", ") + "\n" +
-    "metrics: " + metrics.map { case (a, m) => a.v + ":" + m }.mkString(", ")
+    "metrics: " + metrics.size
+//    "metrics: " + metrics.map { case (a, m) => a.v + ":" + m }.mkString(", ")
 }
 
 // Refinement steps

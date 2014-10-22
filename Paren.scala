@@ -208,6 +208,7 @@ object Parenthesis {
     // refine all functions to finest level, inline, introduce offsets,
     // eliminate common sub-expressions, introduce valid memory overwrites
     compile(par, new PrintStream(new File("paren.py")), py)
+    println(proof)
     close()
   }
 }

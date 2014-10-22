@@ -26,7 +26,7 @@
 <div class="reveal">
 <div class="slides">
 <section>
-<h1><em>Verification</em> and <em>Synthesis</em> of Efficient Dynamic Programming Algorithms</h1>
+<h1><em>Bellmaniac</em> Compiler</h1>
 <h3>Kuat Yessenov</h3>
 </section>
 
@@ -222,32 +222,36 @@ return d0((i - n/4), j, n/2, (lambda _v203, _v204, _v205: w((_v203 + n/4), (_v20
 </section>
 
 <section>
-Analysis of tactic applications
-<table>
+<h3>Analysis of tactic applications</h3>
+<table class='reveal'>
 <tr>
 <th>Algorithm
 <th>rewrite
 <th>split
-<th>splitRange
-
+<th>splitRange*
+<th>time (s)
+<td># steps
 <tr>
 <td>Floyd
 <td>17
 <td>2
 <td>0
-
+<td>11s
+<td>70
 <tr>
 <td>Gap
 <td>12
 <td>3
 <td>12
-
+<td>20s
+<td>40
 <tr>
 <td>Parenthesis
 <td>10
 <td>3
 <td>9
-
+<td>2s
+<td>40
 </table>
 </section>
 
