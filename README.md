@@ -8,4 +8,4 @@ The compiler is written in Scala:
     
     ./sbt update "runMain Floyd"
 
-Slides are <a href='presentation/bellmania.html'>here</a>.
+Slides are <a href='http://rawgit.com/kyessenov/bellmaniac/master/presentation/bellmania.html'>here</a>.
